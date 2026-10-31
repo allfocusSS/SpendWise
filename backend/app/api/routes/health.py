@@ -1,0 +1,14 @@
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+router = APIRouter(prefix="/health", tags=["health"])
+
+
+class HealthResponse(BaseModel):
+    status: str
+
+
+@router.get("", response_model=HealthResponse, operation_id="getHealth")
+def health() -> HealthResponse:
+    """Liveness probe: the process is up and serving requests."""
+    return HealthResponse(status="ok")
