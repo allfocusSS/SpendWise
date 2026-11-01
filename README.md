@@ -393,7 +393,8 @@ Needs Docker with Compose v2 and uv; Node and Python are only needed inside the 
    that PostgreSQL and the app are healthy and that the app started only after PostgreSQL was.
 2. Runs the scenarios below; each test signs up new users with unique emails.
 3. Removes the stack with `docker compose down --volumes`, even when tests fail. On failure it
-   prints the last 200 lines of the container logs first.
+   first prints the container logs (up to 1000 lines per container, including containers
+   replaced by the restart test); `SPENDWISE_IT_LOG_FILE=<path>` also writes them to a file.
 
 **Covered.**
 
@@ -431,12 +432,7 @@ environment and an empty env file: a repo-root `.env` or shell variables such as
 The built `spendwise:integration` image is kept between runs so later builds are faster; remove
 it with `docker image rm spendwise:integration`.
 
-**In CI** (GitHub Actions `ubuntu-latest` has Docker and Compose v2):
-
-```yaml
-- uses: astral-sh/setup-uv@v6
-- run: make integration
-```
+**In CI** this runs as the "Integration" job; see [Continuous integration](#continuous-integration).
 
 ## End-to-end tests (Playwright)
 
@@ -498,10 +494,48 @@ also fails if the page throws an uncaught error or the server answers 5xx.
 | `SPENDWISE_E2E_IMAGE` | `spendwise:e2e` | tag for the image built for the tests |
 | `SPENDWISE_E2E_KEEP` | unset | `1` leaves the stack running afterwards; remove it with `docker compose -p spendwise-e2e down -v` |
 
-**In CI** (GitHub Actions `ubuntu-latest`): install uv and Node 24, run `npm ci` in `frontend/`,
-then `npx playwright install --with-deps chromium` and `make e2e`. Upload `frontend/test-results/`
-and `frontend/playwright-report/` as artifacts when the job fails. `CI=true` turns on one retry,
-two workers and fails on a stray `test.only`.
+**In CI** this runs as the "End-to-end" job; see [Continuous integration](#continuous-integration).
+`CI=true` turns on one retry, two workers and fails on a stray `test.only`.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs the complete suite on every pull request to `main`, on every
+push to `main`, and on demand (Run workflow). Nothing is deployed and no secrets are used.
+
+| Job | What it runs | Same thing locally |
+|---|---|---|
+| Backend (lint + test) | Ruff lint and format check, pytest on SQLite, OpenAPI spec up to date | `cd backend && uv run ruff check . && uv run ruff format --check . && uv run pytest && uv run python scripts/export_openapi.py --check` |
+| Backend (PostgreSQL) | the same pytest suite against a PostgreSQL 18 service container | `cd backend && TEST_DATABASE_URL=postgresql+psycopg://... uv run pytest` (see [Run the tests on PostgreSQL](#run-the-tests-on-postgresql)) |
+| Frontend | oxlint, generated API types match `openapi.json`, typecheck (app and e2e tests), Vitest, production build | `cd frontend && npm ci && npm run lint && npm run generate:api && git diff --exit-code src/api/schema.d.ts && npm run typecheck && npm test && npm run build` |
+| Integration | builds the image and runs the real Compose stack (PostgreSQL), then the integration suite | `make integration` |
+| End-to-end | builds the image and runs the real Compose stack, then Playwright (Chromium, desktop and phone) | `make e2e` |
+| All checks passed | succeeds only if every job above succeeded | |
+
+The five test jobs run in parallel; a full run takes roughly as long as the slowest job,
+End-to-end, which builds the image and installs Chromium before the tests. Use "All checks
+passed" as the single required status check in branch protection.
+
+**When a run is replaced.** A new commit on a pull request cancels that pull request's
+unfinished run. Runs on `main` are never cancelled, so every commit on `main` gets a result.
+
+**Artifacts** (only uploaded when the job fails, kept 14 days, under the run's Summary page):
+
+- `e2e-results`: `playwright-report/` (open `index.html`, or `npx playwright show-report <dir>`)
+  and `test-results/`, with a trace (`npx playwright show-trace trace.zip`), a screenshot,
+  `browser-log.txt` and a page snapshot for each failed test, plus `compose-logs.txt` with the
+  container logs of the run;
+- `integration-compose-logs`: the container logs of the integration run.
+
+The integration job also prints the container logs in its output when a test fails.
+
+**Caching.** uv packages and the Python download (keyed on `backend/uv.lock`) and npm packages
+(keyed on `frontend/package-lock.json`) are cached. The Playwright browser is installed fresh
+each time (Playwright's advice: restoring it takes about as long as downloading it), and the
+Docker image is built from scratch in each job, so a run never depends on a stale cache.
+
+**Security.** The workflow token is read-only (`contents: read`), checkout does not keep the
+token in the repository's git config, every action is pinned to a full commit SHA, and no step
+uses repository secrets. Pull requests from forks run with the same read-only token.
 
 ## Checks
 
