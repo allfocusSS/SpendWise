@@ -2,7 +2,7 @@
 
 AI-powered personal finance manager (MVP). Single currency: KZT (₸).
 
-- **Backend:** FastAPI + SQLAlchemy (SQLite; PostgreSQL planned)
+- **Backend:** FastAPI + SQLAlchemy + Alembic (SQLite for local development and tests, PostgreSQL in production)
 - **Frontend:** React + TypeScript + Tailwind CSS (Vite)
 - **AI:** Anthropic SDK behind a provider interface; a fake provider is the default so the app runs without an API key. All financial calculations happen in Python, never in the AI.
 
@@ -30,20 +30,77 @@ npm install
 npm run dev
 ```
 
+## PostgreSQL
+
+SQLite (the default in `.env.example`) needs no setup and is fine for local development.
+Production and the Docker image use PostgreSQL, through the psycopg 3 driver. The connection
+comes only from `DATABASE_URL`; no credentials are stored in the code or the image.
+
+### Run PostgreSQL locally
+
+With Docker, as below (tested with PostgreSQL 18), or any local PostgreSQL install such as Homebrew `postgresql@18`:
+
+```bash
+export SPENDWISE_DB_PASSWORD="$(openssl rand -hex 16)"   # choose your own; never commit it
+docker network create spendwise                          # lets the app container reach it later
+docker run -d --name spendwise-postgres --network spendwise \
+  -e POSTGRES_USER=spendwise -e POSTGRES_PASSWORD="$SPENDWISE_DB_PASSWORD" -e POSTGRES_DB=spendwise \
+  -p 127.0.0.1:5432:5432 -v spendwise-pgdata:/var/lib/postgresql postgres:18
+```
+
+Point the backend at it in `backend/.env`, then migrate, seed and run as usual:
+
+```bash
+# backend/.env
+DATABASE_URL=postgresql+psycopg://spendwise:<password>@localhost:5432/spendwise
+
+cd backend
+uv run alembic upgrade head
+uv run python -m app.seed
+uv run uvicorn app.main:app --reload
+```
+
+- `postgres://` and `postgresql://` URLs are accepted and use psycopg 3 automatically.
+- URL-encode special characters in the password (`@` → `%40`, `/` → `%2F`, `%` → `%25`).
+- `ENVIRONMENT=production` refuses to start unless `DATABASE_URL` is PostgreSQL.
+- Settings validation errors never print the URL, and `repr(settings)` hides it.
+- There is no tool to copy data from an existing SQLite file; a new PostgreSQL database starts
+  empty (plus the default categories).
+
+### Run the tests on PostgreSQL
+
+Tests use a fresh in-memory SQLite database unless `TEST_DATABASE_URL` is set:
+
+```bash
+docker exec spendwise-postgres createdb -U spendwise spendwise_test
+cd backend
+TEST_DATABASE_URL=postgresql+psycopg://spendwise:<password>@localhost:5432/spendwise_test uv run pytest
+```
+
+Every test creates and drops all tables, so the database name must contain `test`. Never point
+it at a database with real data. CI runs the suite on both SQLite and PostgreSQL.
+
 ## Docker (single production container)
 
 The `Dockerfile` at the repo root builds one image: Node builds the React app to static files,
 and FastAPI serves them alongside the API on port 8000.
 
+The image needs a PostgreSQL `DATABASE_URL`. With the `spendwise-postgres` container from
+[Run PostgreSQL locally](#run-postgresql-locally) on the `spendwise` network:
+
 ```bash
 docker build -t spendwise .
-docker run --rm -p 127.0.0.1:8000:8000 -v spendwise-data:/app/data spendwise
+docker run --rm --network spendwise -p 127.0.0.1:8000:8000 \
+  -e DATABASE_URL="postgresql+psycopg://spendwise:$SPENDWISE_DB_PASSWORD@spendwise-postgres:5432/spendwise" \
+  spendwise
 # http://127.0.0.1:8000  (API under /api, docs at /docs)
 ```
 
 - On start the container runs `alembic upgrade head`, seeds the default categories (only when the
   categories table is empty), then starts Uvicorn on `0.0.0.0:8000` (`backend/scripts/start.sh`).
-- The SQLite database is `/app/data/spendwise.db`; the named volume keeps it between containers.
+- The image sets `ENVIRONMENT=production` and has no `DATABASE_URL` default: without a PostgreSQL
+  URL it exits at once with an error. If PostgreSQL is not reachable yet, the migration fails and
+  the container exits; start the database first or add `--restart on-failure`.
 - The backend serves the frontend only when `FRONTEND_DIST` is set (the image sets it). Client
   routes such as `/transactions` return `index.html`, so a refresh works; unknown `/api/...` paths
   still return JSON 404s.
@@ -171,4 +228,7 @@ CI fails if either the spec or the generated TypeScript types are out of date.
 ```bash
 cd backend && uv run ruff check . && uv run ruff format --check . && uv run pytest
 cd frontend && npm run lint && npm test && npm run build
+
+# Optional: the backend suite on PostgreSQL (see "Run the tests on PostgreSQL")
+cd backend && TEST_DATABASE_URL=postgresql+psycopg://... uv run pytest
 ```

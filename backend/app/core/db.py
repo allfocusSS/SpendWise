@@ -7,9 +7,13 @@ from app.core.config import get_settings
 
 
 def build_engine(database_url: str, **kwargs) -> Engine:
-    """Create an engine; SQLite needs a couple of extra settings to behave like a real DB."""
+    """Create an engine for SQLite (local, tests) or PostgreSQL (production)."""
     is_sqlite = database_url.startswith("sqlite")
     connect_args = {"check_same_thread": False} if is_sqlite else {}
+    if not is_sqlite:
+        # PostgreSQL connections can be closed by the server (restart, idle timeout); check each
+        # pooled connection before use instead of failing the next request.
+        kwargs.setdefault("pool_pre_ping", True)
     engine = create_engine(database_url, connect_args=connect_args, **kwargs)
 
     if is_sqlite:
