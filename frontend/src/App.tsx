@@ -1,7 +1,7 @@
 import { Link, Route, Routes } from 'react-router'
 
 import { Layout } from './components/Layout'
-import { EmptyState } from './components/ui'
+import { EmptyState, linkClass } from './components/ui'
 import { AnalyticsPage } from './pages/AnalyticsPage'
 import { CategoriesPage } from './pages/CategoriesPage'
 import { DashboardPage } from './pages/DashboardPage'
@@ -9,10 +9,13 @@ import { TransactionsPage } from './pages/TransactionsPage'
 
 function NotFound() {
   return (
-    <EmptyState
-      title="Page not found"
-      action={<Link to="/" className="text-sm font-medium text-indigo-700 hover:underline">Go to the dashboard</Link>}
-    />
+    <div className="mx-auto mt-10 max-w-md">
+      <EmptyState
+        title="Page not found"
+        description="The page you are looking for does not exist."
+        action={<Link to="/" className={linkClass}>Go to the dashboard</Link>}
+      />
+    </div>
   )
 }
 

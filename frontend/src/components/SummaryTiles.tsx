@@ -1,32 +1,47 @@
-import type { Summary } from '../api/client'
-import { SERIES } from '../lib/chartColors'
-import { formatKzt } from '../lib/money'
-import { cardClass } from '../lib/styles'
+import type { UseQueryResult } from '@tanstack/react-query'
 
-function Tile({ label, value, marker, note }: { label: string; value: number; marker?: string; note?: string }) {
+import type { Summary } from '../api/client'
+import { formatKzt } from '../lib/money'
+import { labelClass } from '../lib/styles'
+import { InlineError, Skeleton } from './ui'
+
+function Cell({ label, value, query, valueClassName = 'text-ink' }: {
+  label: string
+  value?: string
+  valueClassName?: string
+  query: UseQueryResult<Summary>
+}) {
   return (
-    <div className={`${cardClass} p-4`}>
-      <dt className="flex items-center gap-2 text-sm text-slate-600">
-        {marker && <span className="size-2.5 rounded-sm" style={{ backgroundColor: marker }} aria-hidden="true" />}
-        {label}
-      </dt>
-      <dd className="mt-1 truncate text-2xl font-semibold tracking-tight text-slate-900">{formatKzt(value)}</dd>
-      {note && <dd className="mt-0.5 text-xs text-slate-500">{note}</dd>}
+    // One row of four on wide screens, 2 × 2 below that; hairlines between cells.
+    <div className="flex min-w-0 flex-col gap-1.5 border-line px-4 py-4 odd:pl-0 even:border-l nth-[n+3]:border-t sm:px-6 sm:odd:pl-0 xl:border-l xl:first:border-l-0 xl:nth-3:pl-6 xl:nth-[n+3]:border-t-0">
+      <dt className={labelClass}>{label}</dt>
+      <dd>
+        {query.isError ? (
+          <InlineError error={query.error} onRetry={() => query.refetch()} />
+        ) : query.isPending || value === undefined ? (
+          <Skeleton className="mt-1 h-6 w-2/3" />
+        ) : (
+          <p className={`truncate text-lg font-semibold tracking-tight tabular-nums sm:text-figure ${valueClassName}`} title={value}>{value}</p>
+        )}
+      </dd>
     </div>
   )
 }
 
-/** Income / expenses / net for one period. All numbers are computed by the backend. */
-export function SummaryTiles({ summary, netLabel = 'Net' }: { summary: Summary; netLabel?: string }) {
+/** Net change / money in / money out / count for one period, as one open row of totals (all from the backend). */
+export function SummaryTiles({ query, period }: { query: UseQueryResult<Summary>; period: string }) {
+  const data = query.data
   return (
-    <dl className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-      <Tile label="Income" value={summary.total_income_cents} marker={SERIES.income} />
-      <Tile label="Expenses" value={summary.total_expense_cents} marker={SERIES.expense} />
-      <Tile
-        label={netLabel}
-        value={summary.balance_cents}
-        note={`${summary.transaction_count} transaction${summary.transaction_count === 1 ? '' : 's'}`}
-      />
-    </dl>
+    <section aria-label={`Totals, ${period}`}>
+      <p className={labelClass}>
+        Totals · <span className="text-ink-muted">{period}</span>
+      </p>
+      <dl className="mt-2 grid grid-cols-2 border-y border-line xl:grid-cols-4">
+        <Cell label="Net change" value={data && formatKzt(data.balance_cents)} valueClassName={data && data.balance_cents < 0 ? 'text-expense' : 'text-ink'} query={query} />
+        <Cell label="Money in" value={data && formatKzt(data.total_income_cents)} valueClassName="text-income" query={query} />
+        <Cell label="Money out" value={data && formatKzt(data.total_expense_cents)} query={query} />
+        <Cell label="Transactions" value={data && String(data.transaction_count)} query={query} />
+      </dl>
+    </section>
   )
 }
