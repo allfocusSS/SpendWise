@@ -1,11 +1,124 @@
 @import 'tailwindcss';
 
+/*
+ * SpendWise design system — "Graphite" (dark fintech).
+ * Style: dark, restrained. Hairline rules over boxes, sentence-case labels, no glass, no glow.
+ * Every text/background pair below was measured for WCAG AA (lowest pair 5.3:1). Components use
+ * these tokens, never raw hex values. Chart series colours live in lib/chartColors.ts.
+ */
+@theme {
+  /* Typography: Inter throughout; figures use tabular numerals so columns align. */
+  --font-sans: 'Inter Variable', Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  /* Type scale: few sizes, sentence case, weight does the work instead of capitals. */
+  --text-display: 3.25rem;
+  --text-display--line-height: 1;
+  --text-display--letter-spacing: -0.035em;
+  --text-display--font-weight: 600;
+  --text-figure-lg: 2.125rem;
+  --text-figure-lg--line-height: 1.05;
+  --text-figure-lg--letter-spacing: -0.03em;
+  --text-figure-lg--font-weight: 600;
+  --text-figure: 1.5rem;
+  --text-figure--line-height: 1.1;
+  --text-figure--letter-spacing: -0.025em;
+  --text-figure--font-weight: 600;
+  --text-title: 1.75rem;
+  --text-title--line-height: 1.15;
+  --text-title--letter-spacing: -0.025em;
+  --text-title--font-weight: 600;
+  --text-heading: 1rem;
+  --text-heading--line-height: 1.35;
+  --text-heading--letter-spacing: -0.01em;
+  --text-heading--font-weight: 600;
+  --text-label: 0.8125rem;
+  --text-label--line-height: 1.4;
+
+  /* Graphite surfaces */
+  --color-canvas: #0a0c10;
+  --color-surface: #12151c;
+  --color-surface-raised: #191d26;
+  --color-surface-muted: #161a22;
+  --color-surface-sunken: #0e1116;
+  --color-line: #232834;
+  --color-line-strong: #323949;
+
+  /* Text on graphite */
+  --color-ink: #eef1f6;
+  --color-ink-muted: #a6afbf;
+  --color-ink-subtle: #8892a4;
+
+  /* Signature accent: gold, used sparingly (brand mark, primary action, focus) */
+  --color-accent: #f5b544;
+  --color-accent-strong: #ffc65e;
+  --color-accent-soft: rgb(245 181 68 / 0.12);
+  --color-on-accent: #14110a;
+
+  /* Money semantics (text tokens ≥ 7.9:1 on surfaces; solid fills carry white text ≥ 5.3:1) */
+  --color-income: #3ddc97;
+  --color-income-soft: rgb(61 220 151 / 0.1);
+  --color-income-solid: #0b7a55;
+  --color-income-chart: #12a07a;
+  --color-expense: #ff8a73;
+  --color-expense-soft: rgb(255 138 115 / 0.1);
+  --color-expense-solid: #c13a30;
+  --color-expense-chart: #ec5f53;
+  --color-net: #6a7ff0;
+
+  /* Feedback: danger is for errors and destructive actions (pink-red, distinct from expenses) */
+  --color-danger: #ff6b81;
+  --color-danger-strong: #e2485f;
+  --color-danger-soft: rgb(255 107 129 / 0.1);
+  --color-warning: #f5b544;
+
+  /* Shape and elevation */
+  --radius-card: 10px;
+  --radius-control: 6px;
+  --shadow-pop: 0 24px 64px -16px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(255 255 255 / 0.06);
+}
+
 @layer base {
   html {
-    color-scheme: light;
+    color-scheme: dark;
   }
 
   body {
-    @apply bg-slate-50 text-slate-900 antialiased;
+    @apply bg-canvas font-sans text-ink antialiased;
+    font-feature-settings: 'ss01', 'ss03';
+  }
+
+  ::selection {
+    background: rgb(245 181 68 / 0.3);
+  }
+
+  /* Tailwind v4 no longer gives buttons a pointer cursor; every clickable control gets one. */
+  button:not(:disabled),
+  [role='button'],
+  summary,
+  select,
+  label:has(> input[type='radio']),
+  input[type='date'],
+  input[type='color'] {
+    cursor: pointer;
+  }
+
+  /* Native date pickers follow the dark scheme. */
+  input[type='date']::-webkit-calendar-picker-indicator {
+    filter: invert(0.75);
+  }
+
+  .tabular-nums {
+    font-feature-settings: 'tnum' 1, 'ss01' 1;
+  }
+
+  /* Respect reduced motion: no pulsing skeletons, no transitions. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }
