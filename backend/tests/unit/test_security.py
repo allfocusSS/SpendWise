@@ -64,25 +64,38 @@ def test_session_tokens_are_random_and_stored_only_as_sha256() -> None:
     assert token not in stored
 
 
+PRODUCTION = {"environment": "production", "database_url": "postgresql://u:p@h/d"}
+
+
+def settings(monkeypatch, **values) -> Settings:
+    for var in ("ENVIRONMENT", "DATABASE_URL", "SESSION_COOKIE_SECURE"):
+        monkeypatch.delenv(var, raising=False)
+    return Settings(_env_file=None, **values)
+
+
 @pytest.mark.parametrize(
     ("values", "secure"),
     [
         ({}, False),
         ({"environment": "local"}, False),
-        ({"environment": "production", "database_url": "postgresql://u:p@h/d"}, True),
-        (
-            {
-                "environment": "production",
-                "database_url": "postgresql://u:p@h/d",
-                "session_cookie_secure": "false",
-            },
-            False,
-        ),
+        (PRODUCTION, True),
+        ({**PRODUCTION, "session_cookie_secure": "false"}, False),  # production on http://localhost
         ({"environment": "local", "session_cookie_secure": "true"}, True),
         ({"environment": "local", "session_cookie_secure": ""}, False),
     ],
 )
-def test_secure_cookie_follows_the_environment(monkeypatch, values: dict, secure: bool) -> None:
-    for var in ("ENVIRONMENT", "DATABASE_URL", "SESSION_COOKIE_SECURE"):
-        monkeypatch.delenv(var, raising=False)
-    assert Settings(_env_file=None, **values).cookie_secure is secure
+def test_plain_http_cookie_follows_the_environment(monkeypatch, values: dict, secure: bool) -> None:
+    assert settings(monkeypatch, **values).secure_cookie(request_is_https=False) is secure
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {},
+        {"environment": "local", "session_cookie_secure": "false"},
+        {**PRODUCTION, "session_cookie_secure": "false"},  # e.g. a local setting copied to a host
+        PRODUCTION,
+    ],
+)
+def test_https_requests_always_get_a_secure_cookie(monkeypatch, values: dict) -> None:
+    assert settings(monkeypatch, **values).secure_cookie(request_is_https=True) is True

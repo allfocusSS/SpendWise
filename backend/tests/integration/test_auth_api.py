@@ -201,6 +201,28 @@ def test_secure_cookie_when_configured(
         get_settings.cache_clear()
 
 
+def test_https_requests_get_a_secure_cookie_even_if_configured_for_http(
+    engine, monkeypatch: pytest.MonkeyPatch, app: FastAPI
+) -> None:
+    # A plain-HTTP setting (as in the local Compose stack) must not weaken an HTTPS deployment.
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h/d")  # production requires PostgreSQL
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "false")
+    get_settings.cache_clear()
+    try:
+        browser = TestClient(app, base_url="https://testserver")
+        signup = browser.post("/api/auth/signup", json={"email": ALICE, "password": PASSWORD})
+        assert "secure" in session_cookie_header(signup).lower().split("; ")
+        assert browser.get("/api/auth/me").status_code == 200  # the Secure cookie is sent back
+        logout = browser.post("/api/auth/logout")
+        assert "secure" in session_cookie_header(logout).lower().split("; ")
+
+        plain = TestClient(app).post("/api/auth/login", json={"email": ALICE, "password": PASSWORD})
+        assert "secure" not in session_cookie_header(plain).lower().split("; ")
+    finally:
+        get_settings.cache_clear()
+
+
 def test_only_a_hash_of_the_token_is_stored(anon_client: TestClient, db: Session) -> None:
     sign_up(anon_client, ALICE)
     token = anon_client.cookies[SESSION_COOKIE]

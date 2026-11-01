@@ -40,7 +40,9 @@ from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-COMPOSE_FILE = REPO_ROOT / "compose.yaml"
+# The same files `docker compose up` uses locally: the deployment definition plus the local
+# override (published port, image tag, plain-HTTP cookie), all driven by the values below.
+COMPOSE_FILES = (REPO_ROOT / "compose.yaml", REPO_ROOT / "compose.override.yaml")
 
 # Only what the Docker CLI needs to find and talk to the daemon is passed through.
 PASSTHROUGH_ENV = (
@@ -124,8 +126,7 @@ class Stack:
         command = [
             "docker",
             "compose",
-            "--file",
-            str(COMPOSE_FILE),
+            *(arg for path in COMPOSE_FILES for arg in ("--file", str(path))),
             "--project-name",
             self.project,
             "--env-file",

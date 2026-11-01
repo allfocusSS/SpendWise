@@ -40,3 +40,4 @@ frontend/blob-report
 Dockerfile
 .dockerignore
 compose.yaml
+compose.override.yaml

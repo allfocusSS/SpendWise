@@ -1,9 +1,10 @@
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 from alembic import context
 from app.core.config import get_settings
+from app.core.db import MIGRATION_LOCK
 from app.models import Base
 
 config = context.config
@@ -52,6 +53,13 @@ def run_migrations_online() -> None:
             render_as_batch=_is_sqlite(),
         )
         with context.begin_transaction():
+            if connection.dialect.name == "postgresql":
+                # Several app containers may start at once (replicas, overlapping deploys). The
+                # first takes this lock and migrates; the others wait, then find the schema
+                # current. Released when the migration transaction ends.
+                connection.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_LOCK}
+                )
             context.run_migrations()
 
 

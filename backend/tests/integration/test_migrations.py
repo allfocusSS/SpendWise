@@ -1,6 +1,9 @@
 """Alembic migrations must build exactly the schema the models describe, on every database."""
 
 import os
+import subprocess
+import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -12,6 +15,7 @@ from sqlalchemy import Engine, create_engine, inspect, text
 
 from alembic import command
 from app.core.config import get_settings, normalize_database_url
+from app.core.db import MIGRATION_LOCK
 from app.models import Base
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -57,6 +61,42 @@ def test_upgrade_matches_models_and_downgrade_cleans_up(db_url: str, engine: Eng
 
     command.downgrade(config, "base")
     assert set(inspect(engine).get_table_names()) == {"alembic_version"}
+
+
+def test_concurrent_upgrades_take_turns(db_url: str, engine: Engine) -> None:
+    # Two app containers starting at once (replicas, overlapping deploys) both run
+    # `alembic upgrade head`. On PostgreSQL an advisory lock makes the second wait and then find
+    # nothing to do, instead of failing on tables the first one just created.
+    if not db_url.startswith("postgresql"):
+        pytest.skip("the migration lock is PostgreSQL-only; SQLite has a single writer anyway")
+    env = {**os.environ, "DATABASE_URL": db_url}
+    command_line = [sys.executable, "-m", "alembic", "upgrade", "head"]
+
+    # Hold the lock while both processes start, so they really race once it is released.
+    with engine.connect() as holder:
+        holder.execute(text("SELECT pg_advisory_lock(:key)"), {"key": MIGRATION_LOCK})
+        processes = [
+            subprocess.Popen(
+                command_line,
+                cwd=BACKEND_DIR,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for _ in range(2)
+        ]
+        time.sleep(2)  # both connect and queue up behind the lock
+        holder.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": MIGRATION_LOCK})
+        holder.commit()
+    outputs = [process.communicate(timeout=120)[0] for process in processes]
+
+    assert [process.returncode for process in processes] == [0, 0], outputs
+    assert sum("Running upgrade 0001 -> 0002" in output for output in outputs) == 1, outputs
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).all() == [
+            ("0002",)
+        ]
 
 
 # --- 0002: data created before accounts existed -------------------------------------------------
