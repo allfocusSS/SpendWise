@@ -34,6 +34,7 @@ npm run dev
 
 - Amounts are **positive integers in cents (tiyn)**: `250000` = 2 500.00 ₸. The `type` field (`income` / `expense`) gives the direction. Floats and numeric strings are rejected.
 - All totals, balances, percentages and trends are calculated by the backend.
+- The frontend converts typed tenge to tiyn with string parsing in `frontend/src/lib/money.ts` (`parseKztToTiyn`), never with floating-point multiplication, and enforces the same maximum as the backend (a test compares it with `openapi.json`).
 - Errors return `{"detail": ...}`; `detail` is a string for 404/409/422 business errors and a list for request validation errors.
 
 ## Database migrations
@@ -49,14 +50,15 @@ uv run alembic upgrade head
 The spec is committed at `openapi/openapi.json`. After changing the API:
 
 ```bash
-cd backend && uv run python scripts/export_openapi.py
+cd backend && uv run python scripts/export_openapi.py   # 1. export the spec
+cd frontend && npm run generate:api                     # 2. regenerate src/api/schema.d.ts
 ```
 
-CI fails if the committed spec is out of date.
+CI fails if either the spec or the generated TypeScript types are out of date.
 
 ## Checks
 
 ```bash
 cd backend && uv run ruff check . && uv run ruff format --check . && uv run pytest
-cd frontend && npm run lint && npm run build
+cd frontend && npm run lint && npm test && npm run build
 ```
