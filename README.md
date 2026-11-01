@@ -37,6 +37,24 @@ npm run dev
 - The frontend converts typed tenge to tiyn with string parsing in `frontend/src/lib/money.ts` (`parseKztToTiyn`), never with floating-point multiplication, and enforces the same maximum as the backend (a test compares it with `openapi.json`).
 - Errors return `{"detail": ...}`; `detail` is a string for 404/409/422 business errors and a list for request validation errors.
 
+## AI providers
+
+AI code lives in `backend/app/ai/`. Every provider implements the `AIProvider` protocol
+(`provider.py`) with two methods: `parse_transaction` (free text → unsaved draft) and
+`generate_insights` (backend-calculated summary → plain-language insights).
+
+| `AI_PROVIDER` | Behaviour |
+|---|---|
+| `fake` (default) | Deterministic keyword rules. No network, no API key. Same input → same output. |
+| `anthropic` | Requires `ANTHROPIC_API_KEY`. Not implemented yet (Issue #2): AI features return HTTP 503 with a clear message; the rest of the app works. |
+
+The value is case-insensitive; an unknown value stops the app at startup with a validation error.
+
+**The AI never does money math:**
+
+- Provider outputs contain no money numbers. A draft returns the amount exactly as the user typed it (`amount_text`); the backend converts it to tiyn.
+- Insights receive figures the backend already calculated, pre-formatted (`app/ai/facts.py`), and may only quote them. `find_ungrounded_numbers` flags any number in AI text that is not one of those facts.
+
 ## Database migrations
 
 ```bash
