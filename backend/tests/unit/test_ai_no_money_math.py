@@ -1,9 +1,12 @@
 """The AI layer never calculates, changes or invents money amounts."""
 
+from typing import Annotated, Literal, Union
+
 import pytest
+from pydantic import BaseModel, Field
 
 from app.ai import FakeAIProvider
-from app.ai.facts import find_ungrounded_numbers, summary_facts
+from app.ai.facts import render_insights
 from app.ai.schemas import (
     CategoryOption,
     CategoryShare,
@@ -15,23 +18,107 @@ from app.ai.schemas import (
 )
 from app.core.money import format_kzt
 
+# ---------------------------------------------------------------------------
+# Schema inspection: find every integer/number anywhere in a JSON schema
+# ---------------------------------------------------------------------------
 
-def numeric_properties(schema: dict, defs: dict | None = None, path: str = "") -> set[str]:
-    """Every integer/number property in a JSON schema, following $refs."""
-    defs = defs if defs is not None else schema.get("$defs", {})
-    found = set()
-    for name, prop in schema.get("properties", {}).items():
-        options = prop.get("anyOf", [prop])
-        for option in options:
-            if "$ref" in option:
-                ref = defs[option["$ref"].split("/")[-1]]
-                found |= numeric_properties(ref, defs, f"{path}{name}.")
-            elif option.get("type") == "array" and "$ref" in option.get("items", {}):
-                ref = defs[option["items"]["$ref"].split("/")[-1]]
-                found |= numeric_properties(ref, defs, f"{path}{name}[].")
-            elif option.get("type") in ("integer", "number"):
-                found.add(f"{path}{name}")
+NUMERIC_TYPES = {"integer", "number"}
+
+
+def numeric_paths(schema: dict) -> set[str]:
+    """Paths of every integer/number value a schema allows, however deeply it is nested.
+
+    Follows $ref/$defs, properties, list items (incl. prefixItems), dict values
+    (additionalProperties/patternProperties) and anyOf/oneOf/allOf (Optional, Union, …).
+    """
+    defs = schema.get("$defs", {})
+    found: set[str] = set()
+
+    def walk(node: object, path: str, seen_refs: frozenset[str]) -> None:
+        if not isinstance(node, dict):
+            return
+        if ref := node.get("$ref"):
+            name = ref.split("/")[-1]
+            if name not in seen_refs:  # guard against recursive models
+                walk(defs[name], path, seen_refs | {name})
+        types = node.get("type")
+        if (set(types) if isinstance(types, list) else {types}) & NUMERIC_TYPES:
+            found.add(path or "<root>")
+        for key in ("anyOf", "oneOf", "allOf", "prefixItems"):
+            for option in node.get(key, []):
+                walk(option, path, seen_refs)
+        for name, prop in node.get("properties", {}).items():
+            walk(prop, f"{path}.{name}" if path else name, seen_refs)
+        if isinstance(node.get("items"), dict):
+            walk(node["items"], f"{path}[]", seen_refs)
+        if isinstance(node.get("additionalProperties"), dict):
+            walk(node["additionalProperties"], f"{path}{{}}", seen_refs)
+        for pattern_prop in node.get("patternProperties", {}).values():
+            walk(pattern_prop, f"{path}{{}}", seen_refs)
+
+    walk(schema, "", frozenset())
     return found
+
+
+class TestNumericPathsDetector:
+    """Self-tests: the detector must not miss money hidden in containers or unions."""
+
+    def test_detects_lists_dicts_nested_optional_and_union(self) -> None:
+        class Inner(BaseModel):
+            amount_cents: int
+            label: str
+
+        class Cat(BaseModel):
+            kind: Literal["cat"]
+            price_cents: int
+
+        class Dog(BaseModel):
+            kind: Literal["dog"]
+            price_cents: float
+
+        class Sneaky(BaseModel):
+            plain_cents: int
+            amounts_cents: list[int]
+            by_category_cents: dict[str, int]
+            nested: Inner
+            nested_list: list[Inner]
+            maybe_cents: int | None
+            either: Union[int, str]  # noqa: UP007 - deliberately the typing.Union form
+            pet: Annotated[Cat | Dog, Field(discriminator="kind")]  # emits oneOf
+            fixed: tuple[str, int]  # emits prefixItems
+            text_only: str
+
+        assert numeric_paths(Sneaky.model_json_schema()) == {
+            "plain_cents",
+            "amounts_cents[]",
+            "by_category_cents{}",
+            "nested.amount_cents",
+            "nested_list[].amount_cents",
+            "maybe_cents",
+            "either",
+            "pet.price_cents",
+            "fixed",
+        }
+
+    def test_detects_allof_and_type_lists_in_raw_schemas(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "combined": {"allOf": [{"$ref": "#/$defs/Money"}]},
+                "nullable": {"type": ["integer", "null"]},
+                "patterned": {"type": "object", "patternProperties": {".*": {"type": "number"}}},
+                "safe": {"type": "string"},
+            },
+            "$defs": {"Money": {"type": "object", "properties": {"cents": {"type": "integer"}}}},
+        }
+        assert numeric_paths(schema) == {"combined.cents", "nullable", "patterned{}"}
+
+    def test_survives_recursive_models(self) -> None:
+        class Node(BaseModel):
+            value_cents: int
+            children: list["Node"] = []
+
+        assert numeric_paths(Node.model_json_schema()) == {"value_cents"}
 
 
 @pytest.mark.parametrize(
@@ -42,8 +129,12 @@ def numeric_properties(schema: dict, defs: dict | None = None, path: str = "") -
     ],
 )
 def test_provider_outputs_have_no_numeric_money_fields(model, allowed: set[str]) -> None:
-    assert numeric_properties(model.model_json_schema()) == allowed
+    assert numeric_paths(model.model_json_schema()) == allowed
 
+
+# ---------------------------------------------------------------------------
+# Fake provider: figures only ever come from backend rendering
+# ---------------------------------------------------------------------------
 
 SUMMARIES = [
     SpendingSummary(
@@ -62,7 +153,7 @@ SUMMARIES = [
         total_income_cents=1,
         total_expense_cents=999_999_999_999,
         balance_cents=-999_999_999_998,
-        transaction_count=1234,
+        transaction_count=1,
         top_expense_categories=[
             CategoryShare(name="Housing", total_cents=900_000_000_000, percentage=90.0),
             CategoryShare(name="Food", total_cents=99_999_999_999, percentage=10.0),
@@ -80,16 +171,19 @@ SUMMARIES = [
 
 
 @pytest.mark.parametrize("summary", SUMMARIES, ids=lambda s: s.period_label)
-def test_every_number_in_insights_comes_from_backend_facts(summary: SpendingSummary) -> None:
+def test_fake_output_has_no_figures_and_always_renders(summary: SpendingSummary) -> None:
     result = FakeAIProvider().generate_insights(InsightsRequest(summary=summary))
-    text = " ".join(f"{i.title} {i.message}" for i in result.insights)
 
-    assert find_ungrounded_numbers(text, summary_facts(summary)) == set()
+    # The only provider-written text is advice; it must contain no numeric characters at all.
+    for selection in result.insights:
+        assert not any(c.isnumeric() for c in selection.advice or "")
+    # Raises UngroundedTextError if anything broke the rules.
+    assert render_insights(result, summary)
 
 
-def test_balance_is_quoted_not_recalculated() -> None:
+def test_balance_is_rendered_from_the_backend_value_not_recalculated() -> None:
     # Deliberately inconsistent figures: income − expenses would be 300 000 ₸, but the backend
-    # says 123 456,78 ₸. The provider must repeat the backend's figure and never "fix" it.
+    # says 123 456,78 ₸. The rendered text must show the backend's figure and never "fix" it.
     summary = SpendingSummary(
         period_label="October 2026",
         total_income_cents=500_000_00,
@@ -97,13 +191,11 @@ def test_balance_is_quoted_not_recalculated() -> None:
         balance_cents=123_456_78,
         transaction_count=3,
     )
+    result = FakeAIProvider().generate_insights(InsightsRequest(summary=summary))
 
-    text = " ".join(
-        i.message
-        for i in FakeAIProvider().generate_insights(InsightsRequest(summary=summary)).insights
-    )
+    text = " ".join(i.message for i in render_insights(result, summary))
 
-    assert format_kzt(123_456_78) in text
+    assert f"surplus of {format_kzt(123_456_78)}" in text
     assert format_kzt(300_000_00) not in text
 
 

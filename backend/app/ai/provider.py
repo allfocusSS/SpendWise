@@ -27,7 +27,12 @@ class AIProvider(Protocol):
         ...
 
     def generate_insights(self, request: InsightsRequest) -> InsightsResult:
-        """Explain a backend-calculated spending summary in plain language."""
+        """Choose which insight topics fit a backend-calculated summary, with optional advice.
+
+        Providers return typed topics only (InsightTopic) plus advice without figures. The
+        backend picks and renders every sentence that states a figure, and validates the advice,
+        in app.ai.facts.render_insights.
+        """
         ...
 
 

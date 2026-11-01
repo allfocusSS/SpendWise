@@ -6,14 +6,18 @@ from datetime import date
 import pytest
 
 from app.ai import AIProvider, FakeAIProvider
+from app.ai.facts import render_insights
 from app.ai.schemas import (
     CategoryOption,
     CategoryShare,
     InsightsRequest,
+    InsightTopic,
+    SentenceId,
     SpendingSummary,
     TransactionDraftRequest,
 )
 
+NBSP = "\u00a0"
 TODAY = date(2026, 11, 1)
 CATEGORIES = [
     CategoryOption(id=1, name="Groceries", type="expense"),
@@ -125,46 +129,76 @@ class TestParseTransaction:
 
 
 class TestGenerateInsights:
-    def test_quotes_backend_figures(self) -> None:
-        messages = [i.message for i in insights().insights]
+    def test_returns_typed_topic_selections_only(self) -> None:
+        result = insights()
 
-        assert messages[0] == (
-            "In October 2026 you received 500\u00a0000,50\u00a0₸ and spent 150\u00a0000\u00a0₸. "
-            "Your balance for the period is 350\u00a0000,50\u00a0₸."
-        )
-        assert (
-            "Groceries was your largest expense: 100\u00a0000\u00a0₸ (66.67% of expenses)."
-            in messages
-        )
-        assert any("+12.5%" in m for m in messages)
+        assert [(i.topic, i.advice) for i in result.insights] == [
+            (InsightTopic.OVERVIEW, None),
+            (InsightTopic.BALANCE, None),
+            (
+                InsightTopic.TOP_CATEGORY,
+                "A monthly limit for this category can help you plan ahead.",
+            ),
+            (InsightTopic.EXPENSE_CHANGE, None),
+        ]
+
+    def test_rendered_text_shows_backend_figures(self) -> None:
+        rendered = render_insights(insights(), summary())
+
+        assert [(i.sentence_id, i.message.replace(NBSP, " ")) for i in rendered] == [
+            (
+                SentenceId.OVERVIEW,
+                "In October 2026 you had income of 500 000,50 ₸ and expenses of 150 000 ₸ "
+                "across 5 transactions.",
+            ),
+            (SentenceId.BALANCE_SURPLUS, "The period ended with a surplus of 350 000,50 ₸."),
+            (
+                SentenceId.TOP_CATEGORY,
+                "Your largest expense category was “Groceries”: 100 000 ₸, 66.67% of expenses.",
+            ),
+            (
+                SentenceId.EXPENSE_INCREASE,
+                "Your expenses increased by 12.5% compared with the previous period.",
+            ),
+        ]
 
     def test_reports_the_provider(self) -> None:
         assert insights().provider == "fake"
 
-    def test_empty_period(self) -> None:
-        result = insights(
-            total_income_cents=0,
-            total_expense_cents=0,
-            balance_cents=0,
-            transaction_count=0,
-            top_expense_categories=[],
-            expense_change_percentage=None,
-        )
+    def test_empty_period_selects_nothing_and_backend_renders_no_activity(self) -> None:
+        empty = {
+            "total_income_cents": 0,
+            "total_expense_cents": 0,
+            "balance_cents": 0,
+            "transaction_count": 0,
+            "top_expense_categories": [],
+            "expense_change_percentage": None,
+        }
+        result = insights(**empty)
 
-        assert [i.title for i in result.insights] == ["No activity yet"]
+        assert result.insights == []
+        [rendered] = render_insights(result, summary(**empty))
+        assert rendered.sentence_id == SentenceId.NO_ACTIVITY
 
-    def test_negative_balance_adds_a_warning(self) -> None:
-        titles = [i.title for i in insights(balance_cents=-20_000_00).insights]
+    def test_negative_balance_adds_advice_and_renders_a_deficit(self) -> None:
+        rendered = {
+            i.sentence_id: i
+            for i in render_insights(
+                insights(balance_cents=-20_000_00), summary(balance_cents=-20_000_00)
+            )
+        }
 
-        assert "Spending above income" in titles
+        deficit = rendered[SentenceId.BALANCE_DEFICIT]
+        assert deficit.message.replace(NBSP, " ") == "The period ended with a deficit of 20 000 ₸."
+        assert deficit.advice == "Review your largest categories to see where you can cut back."
 
-    def test_optional_sections_are_skipped_when_data_is_missing(self) -> None:
-        titles = [
-            i.title
+    def test_optional_topics_are_skipped_when_data_is_missing(self) -> None:
+        topics = [
+            i.topic
             for i in insights(top_expense_categories=[], expense_change_percentage=None).insights
         ]
 
-        assert titles == ["Overview"]
+        assert topics == [InsightTopic.OVERVIEW, InsightTopic.BALANCE]
 
 
 def test_makes_no_network_calls(monkeypatch: pytest.MonkeyPatch) -> None:

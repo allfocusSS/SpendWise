@@ -1,12 +1,12 @@
 """Choosing the AI provider from configuration."""
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from app.ai import AIProvider, AIUnavailableError, FakeAIProvider, build_ai_provider
 from app.core.config import Settings
 
-FAKE_KEY = "sk-ant-test-not-a-real-key"
+FAKE_KEY = "test-key-not-a-real-secret"
 
 
 @pytest.fixture(autouse=True)
@@ -74,9 +74,48 @@ def test_anthropic_is_not_available_yet_and_never_leaks_the_key() -> None:
     assert FAKE_KEY not in str(exc_info.value)
 
 
-def test_blank_key_from_env_file_means_not_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "")  # .env.example ships ANTHROPIC_API_KEY=
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_key_from_env_file_means_not_set(monkeypatch: pytest.MonkeyPatch, blank: str) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", blank)  # .env.example ships ANTHROPIC_API_KEY=
     assert settings().anthropic_api_key is None
+
+
+class TestApiKeyIsSecret:
+    """M2: the key is a SecretStr and never appears in representations or messages."""
+
+    @pytest.fixture
+    def config(self) -> Settings:
+        return settings(ai_provider="anthropic", anthropic_api_key=FAKE_KEY)
+
+    def test_key_is_a_secret_str(self, config: Settings) -> None:
+        assert isinstance(config.anthropic_api_key, SecretStr)
+        # Readable only on purpose, by code that sends it to the provider.
+        assert config.anthropic_api_key.get_secret_value() == FAKE_KEY
+
+    @pytest.mark.parametrize(
+        "render",
+        [repr, str, lambda c: str(c.model_dump()), lambda c: c.model_dump_json()],
+        ids=["repr", "str", "model_dump", "model_dump_json"],
+    )
+    def test_representations_do_not_expose_the_key(self, config: Settings, render) -> None:
+        text = render(config)
+        assert FAKE_KEY not in text
+        assert "**********" in text
+
+    def test_key_from_environment_is_masked_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+        assert FAKE_KEY not in repr(settings())
+
+    def test_validation_errors_do_not_expose_the_key(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            settings(ai_provider="openai", anthropic_api_key=FAKE_KEY)
+        assert FAKE_KEY not in str(exc_info.value)
+
+    def test_provider_errors_do_not_expose_the_key(self, config: Settings) -> None:
+        with pytest.raises(AIUnavailableError) as exc_info:
+            build_ai_provider(config)
+        assert FAKE_KEY not in str(exc_info.value)
+        assert FAKE_KEY not in exc_info.value.detail
 
 
 def test_any_object_with_the_right_methods_satisfies_the_protocol() -> None:

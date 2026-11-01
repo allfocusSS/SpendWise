@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     # An unknown AI_PROVIDER value fails at startup with a message listing the allowed values.
     ai_provider: Literal["fake", "anthropic"] = "fake"
     ai_model: str = "claude-opus-5-5"
-    anthropic_api_key: str | None = None
+    # SecretStr: shown as '**********' in repr(), str(), model_dump() and model_dump_json().
+    # Only the provider that sends the key may call .get_secret_value().
+    anthropic_api_key: SecretStr | None = None
 
     @field_validator("ai_provider", mode="before")
     @classmethod

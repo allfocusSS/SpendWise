@@ -14,8 +14,9 @@ def build_ai_provider(settings: Settings) -> AIProvider:
         case "fake":
             return FakeAIProvider()
         case "anthropic":
-            # Never include the key itself in messages or logs.
-            if not settings.anthropic_api_key:
+            # The key is a SecretStr and is not read here: only the Anthropic provider (Issue #2)
+            # may call get_secret_value(). Never include the key in messages or logs.
+            if settings.anthropic_api_key is None:
                 raise AIUnavailableError(
                     "AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY. Set it, or use "
                     "AI_PROVIDER=fake for local development."
