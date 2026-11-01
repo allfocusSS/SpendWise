@@ -1,15 +1,24 @@
-from collections.abc import Iterator
+import os
 
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import Engine
-from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
+# Test configuration is fixed BEFORE the app is imported: app.core.db reads the settings at import
+# time, so an invalid AI_PROVIDER (or a real key) in the developer's shell or backend/.env must not
+# reach the tests. Environment variables take priority over .env, so these values always win.
+# Tests that check provider selection set their own values with monkeypatch.
+os.environ["AI_PROVIDER"] = "fake"
+os.environ["ANTHROPIC_API_KEY"] = ""
 
-from app.core.db import build_engine, get_db
-from app.main import create_app
-from app.models import Base
-from app.seed import seed_default_categories
+from collections.abc import Iterator  # noqa: E402
+
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import Engine  # noqa: E402
+from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+
+from app.core.db import build_engine, get_db  # noqa: E402
+from app.main import create_app  # noqa: E402
+from app.models import Base  # noqa: E402
+from app.seed import seed_default_categories  # noqa: E402
 
 
 @pytest.fixture
