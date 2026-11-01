@@ -9,8 +9,9 @@ AI-powered personal finance manager (MVP). Single currency: KZT (₸).
 Each person signs up with an email and password and sees only their own transactions, categories
 and analytics (see [Accounts and security](#accounts-and-security)).
 
-> ⚠️ Not deployed anywhere yet. Before a public deployment, also read
-> [Before deploying](#before-deploying).
+> ⚠️ Ready for a first deployment on Railway from `compose.yaml` (see
+> [Deploy to Railway](#deploy-to-railway)), but not deployed yet. Read
+> [Before deploying](#before-deploying) first.
 
 ## Quick start (Docker Compose)
 
@@ -97,7 +98,15 @@ it at a database with real data. CI runs the suite on both SQLite and PostgreSQL
 
 ## Docker Compose
 
-`compose.yaml` runs two services on a private Compose network:
+Two files describe the stack:
+
+- `compose.yaml` is the deployment definition: the two services, the volume and the production
+  settings, with no secrets and nothing local. It is what gets imported into Railway.
+- `compose.override.yaml` adds local development defaults (a fixed database password,
+  plain-HTTP cookies, port 8000 on 127.0.0.1 and the `spendwise:local` image tag). Docker Compose
+  merges it automatically when you run `docker compose` in the repo, so local use is unchanged.
+
+Together they run two services on a private Compose network:
 
 | Service | What it is | Reachable from your machine |
 |---|---|---|
@@ -113,8 +122,8 @@ docker compose down              # stop and remove the containers; the database 
 ```
 
 **Startup order.** `db` is healthy once `pg_isready` succeeds. Only then does Compose start `app`,
-which runs `alembic upgrade head` and starts Uvicorn (default categories are created per account
-at signup). `app` is healthy once `GET /api/health/ready` (the image's own health check)
+which checks that the database answers, runs `alembic upgrade head` and starts Uvicorn (default
+categories are created per account at signup). `app` is healthy once `GET /api/health/ready` (the image's own health check)
 reaches the database. Both services use `restart: unless-stopped`: they restart after a crash or
 a Docker restart, but stay down after `docker compose stop` or `down`. If `db` is restarted with
 Compose, `app` is restarted after it.
@@ -137,7 +146,7 @@ variables) or export it in your shell:
 | `POSTGRES_USER` | `spendwise` | database user |
 | `POSTGRES_PASSWORD` | `spendwise-local-only` | database password; letters, digits, `-` `_` `.` only (it goes into `DATABASE_URL`) |
 | `APP_PORT` | `8000` | port on 127.0.0.1 where the app is published |
-| `SESSION_COOKIE_SECURE` | `false` | `true` sends the session cookie over HTTPS only; this stack is plain HTTP on localhost |
+| `SESSION_COOKIE_SECURE` | `false` | whether plain-HTTP responses mark the cookie Secure; this stack is plain HTTP on localhost. HTTPS requests always get a Secure cookie |
 | `SESSION_TTL_DAYS` | `14` | how long a sign-in lasts |
 | `SPENDWISE_IMAGE` | `spendwise:local` | tag for the built app image (the integration tests use their own) |
 | `AI_PROVIDER` / `AI_MODEL` / `ANTHROPIC_API_KEY` | `fake` / `claude-opus-5-5` / empty | passed to the app; see [AI providers](#ai-providers) |
@@ -149,15 +158,16 @@ credentials only when the volume is first created; after changing them, run
 
 The default password is only for this local stack: the database is not published outside the
 Compose network. To connect with `psql` or a GUI, uncomment the `ports` lines under `db` in
-`compose.yaml` (they bind to 127.0.0.1 only).
+`compose.override.yaml` (they bind to 127.0.0.1 only).
 
-> ⚠️ This stack is for local use: plain HTTP, a default database password and port 8000 on
-> 127.0.0.1 only. Do not deploy it as is; see [Before deploying](#before-deploying).
+> ⚠️ The local defaults live only in `compose.override.yaml`. `compose.yaml` on its own has no
+> database password, so PostgreSQL refuses to start until one is provided.
 
 ## Docker image without Compose
 
 The `Dockerfile` at the repo root builds one image: Node builds the React app to static files,
-and FastAPI serves them alongside the API on port 8000. Compose (above) uses this image; the
+and FastAPI serves them alongside the API on `$PORT` (default 8000). Compose (above) uses this
+image; the
 commands below run it by hand against a PostgreSQL you manage yourself.
 
 The image needs a PostgreSQL `DATABASE_URL`. With the `spendwise-postgres` container from
@@ -172,13 +182,18 @@ docker run --rm --network spendwise -p 127.0.0.1:8000:8000 \
 # http://127.0.0.1:8000  (API under /api, docs at /docs)
 ```
 
-- On start the container runs `alembic upgrade head`, then starts Uvicorn on `0.0.0.0:8000`
-  (`backend/scripts/start.sh`).
-- The image runs with `ENVIRONMENT=production`, so the session cookie is `Secure` (HTTPS only)
-  unless `SESSION_COOKIE_SECURE=false` is set, as above for plain HTTP on localhost.
+- On start the container (`backend/scripts/start.sh`) waits until the database answers (up to
+  `DB_WAIT_TIMEOUT` seconds, default 60, then exits with an error), runs `alembic upgrade head`
+  and starts Uvicorn on `0.0.0.0:$PORT` (`PORT` defaults to 8000; hosts such as Railway set it).
+  Containers starting at the same time take turns migrating (a PostgreSQL advisory lock).
+- Uvicorn trusts `X-Forwarded-Proto`/`X-Forwarded-For` from `FORWARDED_ALLOW_IPS` (default `*`,
+  any address), so requests that reached a proxy over HTTPS are seen as HTTPS. Narrow it to the
+  proxy's address if the container can be reached directly by untrusted clients.
+- The image runs with `ENVIRONMENT=production`, so the session cookie is `Secure` (HTTPS only).
+  For plain HTTP on localhost set `SESSION_COOKIE_SECURE=false`, as above; requests that arrive
+  over HTTPS still get a Secure cookie.
 - The image sets `ENVIRONMENT=production` and has no `DATABASE_URL` default: without a PostgreSQL
-  URL it exits at once with an error. If PostgreSQL is not reachable yet, the migration fails and
-  the container exits; start the database first or add `--restart on-failure`.
+  URL it exits at once with an error.
 - The backend serves the frontend only when `FRONTEND_DIST` is set (the image sets it). Client
   routes such as `/transactions` return `index.html`, so a refresh works; unknown `/api/...` paths
   still return JSON 404s.
@@ -186,6 +201,137 @@ docker run --rm --network spendwise -p 127.0.0.1:8000:8000 \
   into the image.
 
 > ⚠️ Not deployed yet; see [Before deploying](#before-deploying).
+
+## Deploy to Railway
+
+SpendWise deploys to [Railway](https://railway.com) from `compose.yaml`: one `app` service built
+from the `Dockerfile` (UI and API) and one `db` service (`postgres:18`) with a persistent volume.
+Railway gives the app HTTPS; the database stays on Railway's private network.
+
+> Import only `compose.yaml`, never `compose.override.yaml`: the override holds the local
+> development password and plain-HTTP settings.
+
+### How the Compose file maps to Railway
+
+| `compose.yaml` | On Railway |
+|---|---|
+| `db` (`image: postgres:18`) | an image service named `db` |
+| `pgdata:/var/lib/postgresql` | a Railway volume on `db`, mounted at `/var/lib/postgresql`; it survives redeploys and restarts |
+| `app` (`build: .`) | a service built from this repository's `Dockerfile` |
+| service names | private hostnames: `db.railway.internal`, `app.railway.internal` |
+| `depends_on`, `healthcheck`, `restart` | not used by Railway. The app waits for the database itself (up to `DB_WAIT_TIMEOUT`, default 60 s) and Railway's health check is set per service (below) |
+| `environment` | service variables; review and set them as below, since `compose.yaml` has no password and its `DATABASE_URL` uses the Compose hostname `db` |
+
+Railway injects `PORT` into each service; the app listens on it, and Railway's health check and
+public domain use it. No port is ever published for `db`.
+
+### Steps
+
+1. **Create the project.** In Railway: New Project, then Empty Project. Drag `compose.yaml` from
+   this repository onto the project canvas. Railway shows the `db` and `app` services and the
+   volume as staged changes. Do not deploy yet.
+2. **Point `app` at this repository.** Open `app`, then Settings, Source: connect the GitHub
+   repository, branch `main`, root directory `/`. Under Build, the builder is Dockerfile with the
+   path `Dockerfile` (Railway detects it). If the import created `app` from an image name
+   instead, change its source to the repository here.
+3. **Check the volume.** `db` must have a volume mounted at `/var/lib/postgresql` (Settings,
+   Volumes). If the import did not create it, right-click `db`, Attach Volume, mount path
+   `/var/lib/postgresql`.
+4. **Set the `db` variables** (Variables, Raw Editor). Generate the password locally, for
+   example with `openssl rand -hex 32` (letters and digits only, because it goes into a URL), and
+   paste it in. It is stored only in Railway, never in the repository.
+
+   ```
+   POSTGRES_USER=spendwise
+   POSTGRES_DB=spendwise
+   POSTGRES_PASSWORD=<generated password>
+   ```
+
+5. **Set the `app` variables** (Variables, Raw Editor). The `${{db.…}}` references are filled in
+   by Railway from the `db` service, so the password is entered only once:
+
+   ```
+   ENVIRONMENT=production
+   PORT=8000
+   DATABASE_URL=postgresql://${{db.POSTGRES_USER}}:${{db.POSTGRES_PASSWORD}}@${{db.RAILWAY_PRIVATE_DOMAIN}}:5432/${{db.POSTGRES_DB}}
+   SESSION_TTL_DAYS=14
+   AI_PROVIDER=fake
+   ```
+
+   Remove any other variable the import added, in particular `SESSION_COOKIE_SECURE`,
+   `APP_PORT` and `SPENDWISE_IMAGE`. Leave `SESSION_COOKIE_SECURE` unset: every HTTPS request
+   gets a Secure cookie anyway. `PORT=8000` is optional (Railway injects a `PORT` otherwise);
+   setting it keeps the port predictable.
+6. **Public domain for `app` only.** `app`, Settings, Networking, Public Networking: Generate
+   Domain. The target port is the app's port (8000 with the variable above). Do not generate a
+   domain or a TCP proxy for `db`.
+7. **Health check.** `app`, Settings, Deploy: Healthcheck Path `/api/health/ready` (it answers
+   200 only when the database is reachable). The default timeout (300 s) covers the database wait
+   and the migrations. Keep the restart policy On Failure and 1 replica.
+8. **Deploy** (apply the staged changes). In `app`'s Deploy Logs, expect:
+
+   ```
+   Database is ready (attempt N).
+   Running upgrade  -> 0001, initial schema
+   Running upgrade 0001 -> 0002, users, sessions and per-user ownership …
+   Uvicorn running on http://0.0.0.0:8000
+   ```
+
+   The first deployment creates the schema. Later deployments run only new migrations; none of
+   them drops user data, and concurrent starts take turns (PostgreSQL advisory lock). If the app
+   gives up waiting before PostgreSQL's first start finishes, the restart policy starts it again.
+
+**Persistence.** All data is in the `db` volume. Redeploying or restarting `app` never touches
+it, and redeploying or restarting `db` keeps it. Deleting the volume (or the `db` service with
+its volume) deletes the data. Consider Railway's volume backups for `db`.
+
+### Verify the deployment
+
+In a browser: open the domain, create an account, refresh (still signed in), log out and log in
+again. In the developer tools, the `spendwise_session` cookie is `HttpOnly`, `Secure` and
+`SameSite=Lax`. Then from a terminal:
+
+```bash
+APP=https://<your-app>.up.railway.app   # the domain from step 6
+PW='<a password of 12+ characters>'     # only for these throwaway check accounts
+
+# Public frontend and health
+curl -fsS "$APP/" | grep -q '<div id="root">' && echo "frontend: OK"
+curl -fsS "$APP/api/health"          # {"status":"ok"}
+curl -fsS "$APP/api/health/ready"    # {"status":"ok"} (the database answers)
+curl -sS -o /dev/null -w '%{http_code}\n' "$APP/api/categories"   # 401 without a session
+
+# Sign up: the cookie must be HttpOnly, SameSite=lax and Secure
+curl -sS -c alice.jar -D - -o /dev/null -H 'Content-Type: application/json' \
+  -d "{\"email\":\"deploy-check-alice@example.com\",\"password\":\"$PW\"}" \
+  "$APP/api/auth/signup" | grep -i '^set-cookie'
+
+# Create a transaction
+GROCERIES=$(curl -fsS -b alice.jar "$APP/api/categories?type=expense" \
+  | python3 -c 'import json,sys; print(next(c["id"] for c in json.load(sys.stdin) if c["name"]=="Groceries"))')
+TX=$(curl -fsS -b alice.jar -H 'Content-Type: application/json' \
+  -d "{\"amount_cents\":250000,\"type\":\"expense\",\"category_id\":$GROCERIES,\"description\":\"Deployment check\",\"occurred_on\":\"$(date +%F)\"}" \
+  "$APP/api/transactions" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+# Log out (the session ends on the server), then log in again
+curl -sS -b alice.jar -c alice.jar -X POST -o /dev/null -w '%{http_code}\n' "$APP/api/auth/logout"  # 204
+curl -sS -b alice.jar -o /dev/null -w '%{http_code}\n' "$APP/api/auth/me"                        # 401
+curl -fsS -c alice.jar -H 'Content-Type: application/json' \
+  -d "{\"email\":\"deploy-check-alice@example.com\",\"password\":\"$PW\"}" "$APP/api/auth/login"
+
+# Persistence: in Railway, redeploy app (Deployments, ⋮, Redeploy) and restart db, then:
+curl -fsS -b alice.jar "$APP/api/transactions" | grep -q "Deployment check" && echo "data kept: OK"
+
+# A second user sees none of it
+curl -sS -c bob.jar -o /dev/null -H 'Content-Type: application/json' \
+  -d "{\"email\":\"deploy-check-bob@example.com\",\"password\":\"$PW\"}" "$APP/api/auth/signup"
+curl -fsS -b bob.jar "$APP/api/transactions"                                       # "total":0
+curl -sS -b bob.jar -o /dev/null -w '%{http_code}\n' "$APP/api/transactions/$TX"   # 404
+curl -fsS -b bob.jar "$APP/api/analytics/summary"                                  # all zeros
+```
+
+There is no account deletion yet, so the check accounts stay in the database; use a separate
+Railway environment for repeated checks.
 
 ## Accounts and security
 
@@ -208,8 +354,10 @@ and both run a full hash check so they take about as long.
 14). JavaScript cannot read it and nothing is stored in `localStorage`. The database keeps only
 the token's SHA-256, so a copy of the `sessions` table cannot be used to sign in. Logging out
 deletes the session on the server, so a copied cookie stops working too. Each login issues a new
-token and ends the browser's previous session. The cookie is `Secure` when
-`ENVIRONMENT=production`, unless `SESSION_COOKIE_SECURE` says otherwise.
+token and ends the browser's previous session. The cookie is `Secure` for every request that
+arrived over HTTPS (directly or through a proxy that sends `X-Forwarded-Proto: https`) and, for
+plain HTTP, when `ENVIRONMENT=production` unless `SESSION_COOKIE_SECURE=false`. A plain-HTTP
+setting therefore can never weaken an HTTPS deployment.
 
 **Cross-site requests.** `SameSite=Lax` keeps the cookie off cross-site `POST`, `PUT`, `PATCH` and
 `DELETE` requests, and JSON bodies are only accepted with `Content-Type: application/json`, which a
@@ -251,10 +399,10 @@ Downgrading below `0002` deletes all users, sessions, categories and transaction
 ### Before deploying
 
 Accounts and per-user isolation are in place, but this MVP has not been deployed. A public
-deployment also needs:
+deployment (for example [on Railway](#deploy-to-railway)) also needs:
 
-- HTTPS in front of the app, with `SESSION_COOKIE_SECURE` left unset or `true`;
-- a real database password (not the Compose default) and backups;
+- HTTPS in front of the app (Railway provides it), with `SESSION_COOKIE_SECURE` unset;
+- a real database password (not the local default) and backups;
 - rate limiting on `/api/auth/login` and `/api/auth/signup` at the reverse proxy: the app does
   not limit login attempts itself.
 

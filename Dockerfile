@@ -1,15 +1,15 @@
 # syntax=docker/dockerfile:1
 
 # SpendWise production image. The React app is built to static files and served by FastAPI,
-# so one container serves the UI and the API (/api) on port 8000. The database is PostgreSQL,
-# passed in at run time (no credentials are baked into the image):
+# so one container serves the UI and the API (/api) on $PORT (default 8000). The database is
+# PostgreSQL, passed in at run time (no credentials are baked into the image):
 #
 #   docker build -t spendwise .
 #   docker run --rm -p 127.0.0.1:8000:8000 \
 #     -e DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/spendwise spendwise
 #
-# The session cookie is Secure (HTTPS only) in production; for plain HTTP on localhost add
-# -e SESSION_COOKIE_SECURE=false. Not deployed yet: see README, "Before deploying".
+# The session cookie is Secure for every HTTPS request and in production; for plain HTTP on
+# localhost add -e SESSION_COOKIE_SECURE=false. Deploying: see README, "Deploy to Railway".
 
 # ---- 1. Frontend build (Node) ----
 FROM node:24-slim AS frontend
@@ -53,7 +53,8 @@ COPY --from=frontend /build/frontend/dist ./frontend_dist
 USER spendwise
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=4)"]
+# Listens on $PORT if the platform sets one (Railway does), otherwise 8000; see start.sh.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen(f\"http://127.0.0.1:{os.environ.get('PORT', '8000')}/api/health/ready\", timeout=4)"]
 
 CMD ["./start.sh"]

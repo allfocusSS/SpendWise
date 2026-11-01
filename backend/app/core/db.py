@@ -27,6 +27,9 @@ def build_engine(database_url: str, **kwargs) -> Engine:
     return engine
 
 
+# Fixed id of the PostgreSQL advisory lock that serialises concurrent migrations (alembic/env.py).
+MIGRATION_LOCK = 4_172_093_388_514_207
+
 engine = build_engine(get_settings().database_url)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 

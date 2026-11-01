@@ -41,9 +41,10 @@ class Settings(BaseSettings):
     # where the Vite dev server serves the frontend.
     frontend_dist: Path | None = None
 
-    # Sign-in sessions (HttpOnly cookie). SESSION_COOKIE_SECURE unset means "Secure in production
-    # only": browsers then send the cookie over HTTPS only. Set it to false only for a production
-    # build served over plain HTTP on localhost (the Docker Compose stack does this).
+    # Sign-in sessions (HttpOnly cookie). A cookie sent over HTTPS is always Secure. For plain
+    # HTTP requests, SESSION_COOKIE_SECURE decides: unset means Secure in production only;
+    # false allows a production build on http://localhost (the local Compose stack sets it).
+    # See secure_cookie().
     session_cookie_secure: bool | None = None
     session_ttl_days: int = Field(default=14, ge=1, le=90)
 
@@ -72,8 +73,15 @@ class Settings(BaseSettings):
     def _normalise_database_url(cls, value: object) -> object:
         return normalize_database_url(value) if isinstance(value, str) else value
 
-    @property
-    def cookie_secure(self) -> bool:
+    def secure_cookie(self, request_is_https: bool) -> bool:
+        """Whether the session cookie gets the Secure attribute (HTTPS only).
+
+        A request that arrived over HTTPS (directly, or as reported by a trusted proxy's
+        X-Forwarded-Proto) always gets a Secure cookie, so a setting meant for local plain HTTP
+        can never weaken a public HTTPS deployment.
+        """
+        if request_is_https:
+            return True
         if self.session_cookie_secure is not None:
             return self.session_cookie_secure
         return self.environment == "production"

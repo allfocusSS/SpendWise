@@ -1,12 +1,18 @@
-# SpendWise local stack: PostgreSQL 18 + the production app image (UI and API on one port).
+# SpendWise: PostgreSQL 18 + the production app image (UI and API in one container).
+#
+# This file is the deployment definition: it is what gets imported into Railway (README,
+# "Deploy to Railway"). It holds no secrets and no local-only settings, so the database
+# password must come from the environment.
+#
+# Locally, `docker compose` also merges compose.override.yaml automatically, which adds the
+# development defaults (a fixed database password, plain-HTTP cookies, port 8000 on 127.0.0.1):
 #
 #   docker compose up --build    # build and start; open http://localhost:8000
 #   docker compose down          # stop and remove the containers; the database volume is kept
 #   docker compose down -v       # stop and DELETE the local database (the "pgdata" volume)
 #
-# Settings are read from the shell or from a .env file next to this file (see .env.example,
-# "Docker Compose"). The defaults are for local development only (plain HTTP, a default database
-# password): do not deploy this stack as is. See README, "Before deploying".
+# Settings are read from the shell or from a .env file next to this file (.env.example,
+# "Docker Compose").
 
 name: spendwise
 
@@ -14,14 +20,16 @@ services:
   db:
     image: postgres:18
     environment:
-      # Local-development defaults; override in .env. The same values build DATABASE_URL below,
-      # so the password must be URL-safe (letters, digits, - _ .). They only take effect when the
-      # volume is first created: changing them later needs `docker compose down -v`.
+      # Applied only when the volume is first created. The same values build DATABASE_URL below,
+      # so the password must be URL-safe (letters, digits, - _ .).
       POSTGRES_DB: ${POSTGRES_DB:-spendwise}
       POSTGRES_USER: ${POSTGRES_USER:-spendwise}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spendwise-local-only}
+      # No default here: PostgreSQL refuses to initialise without a password, so a deployment
+      # that forgot to set one fails instead of running with a known password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
     volumes:
-      # PostgreSQL 18 images keep their data under /var/lib/postgresql/18/docker.
+      # PostgreSQL 18 keeps its data in /var/lib/postgresql/18/docker, a subdirectory of the
+      # volume, so a platform volume's lost+found at the mount root does not get in the way.
       - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
@@ -30,33 +38,27 @@ services:
       retries: 10
       start_period: 10s
     restart: unless-stopped
-    # Not published: only the app reaches the database, over the Compose network. To use psql
-    # or a GUI from your machine, uncomment this (127.0.0.1 keeps it off your local network):
-    # ports:
-    #   - "127.0.0.1:5432:5432"
+    # Never published: only the app reaches the database, over the private network.
 
   app:
     build: .
-    # Tag for the built image. The integration tests use their own tag so they never replace
-    # the image of your local stack.
-    image: ${SPENDWISE_IMAGE:-spendwise:local}
     depends_on:
       db:
-        # Start only after pg_isready passes, so the startup migration can connect.
+        # Compose starts the app after pg_isready passes. Platforms without ordering are covered
+        # by the app itself, which waits for the database before migrating (start.sh).
         condition: service_healthy
         restart: true
     environment:
       ENVIRONMENT: production
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-spendwise}:${POSTGRES_PASSWORD:-spendwise-local-only}@db:5432/${POSTGRES_DB:-spendwise}
+      # "db" is the database's hostname on the Compose network. Platforms with other private
+      # hostnames set DATABASE_URL themselves (README, "Deploy to Railway").
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-spendwise}:${POSTGRES_PASSWORD:-}@db:5432/${POSTGRES_DB:-spendwise}
       AI_PROVIDER: ${AI_PROVIDER:-fake}
       AI_MODEL: ${AI_MODEL:-claude-opus-5-5}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # The stack is served over plain HTTP on localhost, so the session cookie cannot be
-      # HTTPS-only here. Behind HTTPS, set SESSION_COOKIE_SECURE=true.
-      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-14}
-    ports:
-      - "127.0.0.1:${APP_PORT:-8000}:8000"
+      # No SESSION_COOKIE_SECURE: production cookies are Secure, and every HTTPS request gets a
+      # Secure cookie regardless. The app listens on $PORT if the platform provides it, else 8000.
     # The image's HEALTHCHECK (GET /api/health/ready) applies; it is not redefined here.
     restart: unless-stopped
 

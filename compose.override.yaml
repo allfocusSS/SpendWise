@@ -1,0 +1,26 @@
+# Local development additions. `docker compose` merges this file into compose.yaml automatically
+# on your machine; deployments import compose.yaml only, so none of this reaches them.
+#
+# The defaults are for this local stack only: plain HTTP on 127.0.0.1 and a database that is not
+# published outside the Compose network. Override any of them in a repo-root .env file.
+
+services:
+  db:
+    environment:
+      # Applied only when the volume is first created: after changing it, `docker compose down -v`.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spendwise-local-only}
+    # To use psql or a GUI from your machine (127.0.0.1 keeps it off your local network):
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+
+  app:
+    # Tag for the built image. The integration and end-to-end tests use their own tags, so they
+    # never replace the image of your local stack.
+    image: ${SPENDWISE_IMAGE:-spendwise:local}
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-spendwise}:${POSTGRES_PASSWORD:-spendwise-local-only}@db:5432/${POSTGRES_DB:-spendwise}
+      # Plain HTTP on localhost: allow the session cookie without HTTPS. HTTPS requests still get
+      # a Secure cookie whatever this says.
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
