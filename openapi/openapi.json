@@ -894,7 +894,8 @@
           },
           "total_cents": {
             "type": "integer",
-            "title": "Total Cents"
+            "title": "Total Cents",
+            "description": "Amount in tiyn (1 KZT = 100 tiyn)."
           },
           "items": {
             "items": {
@@ -930,7 +931,8 @@
           },
           "total_cents": {
             "type": "integer",
-            "title": "Total Cents"
+            "title": "Total Cents",
+            "description": "Amount in tiyn (1 KZT = 100 tiyn)."
           },
           "transaction_count": {
             "type": "integer",
@@ -1116,15 +1118,18 @@
           },
           "income_cents": {
             "type": "integer",
-            "title": "Income Cents"
+            "title": "Income Cents",
+            "description": "Amount in tiyn (1 KZT = 100 tiyn)."
           },
           "expense_cents": {
             "type": "integer",
-            "title": "Expense Cents"
+            "title": "Expense Cents",
+            "description": "Amount in tiyn (1 KZT = 100 tiyn)."
           },
           "net_cents": {
             "type": "integer",
-            "title": "Net Cents"
+            "title": "Net Cents",
+            "description": "Amount in tiyn (1 KZT = 100 tiyn)."
           }
         },
         "type": "object",
@@ -1164,15 +1169,18 @@
           },
           "total_income_cents": {
             "type": "integer",
-            "title": "Total Income Cents"
+            "title": "Total Income Cents",
+            "description": "Amount in tiyn (1 KZT = 100 tiyn)."
           },
           "total_expense_cents": {
             "type": "integer",
-            "title": "Total Expense Cents"
+            "title": "Total Expense Cents",
+            "description": "Amount in tiyn (1 KZT = 100 tiyn)."
           },
           "balance_cents": {
             "type": "integer",
-            "title": "Balance Cents"
+            "title": "Balance Cents",
+            "description": "Amount in tiyn (1 KZT = 100 tiyn)."
           },
           "transaction_count": {
             "type": "integer",
@@ -1196,7 +1204,8 @@
             "type": "integer",
             "maximum": 1000000000000.0,
             "exclusiveMinimum": 0.0,
-            "title": "Amount Cents"
+            "title": "Amount Cents",
+            "description": "Amount in tiyn (1 KZT = 100 tiyn)."
           },
           "type": {
             "$ref": "#/components/schemas/TransactionType"
@@ -1271,7 +1280,8 @@
           },
           "amount_cents": {
             "type": "integer",
-            "title": "Amount Cents"
+            "title": "Amount Cents",
+            "description": "Amount in tiyn (1 KZT = 100 tiyn)."
           },
           "type": {
             "$ref": "#/components/schemas/TransactionType"
@@ -1343,7 +1353,8 @@
             "type": "integer",
             "maximum": 1000000000000.0,
             "exclusiveMinimum": 0.0,
-            "title": "Amount Cents"
+            "title": "Amount Cents",
+            "description": "Amount in tiyn (1 KZT = 100 tiyn)."
           },
           "type": {
             "$ref": "#/components/schemas/TransactionType"

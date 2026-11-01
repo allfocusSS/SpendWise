@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.models import TransactionSource, TransactionType
 from app.schemas.category import CategoryRead
-from app.schemas.common import AmountCents, NonEmptyStr255
+from app.schemas.common import AmountCents, MoneyCents, NonEmptyStr255
 
 
 class TransactionCreate(BaseModel):
@@ -26,7 +26,7 @@ class TransactionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    amount_cents: int
+    amount_cents: MoneyCents
     type: TransactionType
     category_id: int
     category: CategoryRead
