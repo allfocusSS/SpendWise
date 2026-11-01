@@ -1,0 +1,58 @@
+# SpendWise local stack: PostgreSQL 18 + the production app image (UI and API on one port).
+#
+#   docker compose up --build    # build and start; open http://localhost:8000
+#   docker compose down          # stop and remove the containers; the database volume is kept
+#   docker compose down -v       # stop and DELETE the local database (the "pgdata" volume)
+#
+# Settings are read from the shell or from a .env file next to this file (see .env.example,
+# "Docker Compose"). The defaults are for local development only. There is no authentication
+# yet: do not deploy this stack or expose it publicly.
+
+name: spendwise
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      # Local-development defaults; override in .env. The same values build DATABASE_URL below,
+      # so the password must be URL-safe (letters, digits, - _ .). They only take effect when the
+      # volume is first created: changing them later needs `docker compose down -v`.
+      POSTGRES_DB: ${POSTGRES_DB:-spendwise}
+      POSTGRES_USER: ${POSTGRES_USER:-spendwise}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spendwise-local-only}
+    volumes:
+      # PostgreSQL 18 images keep their data under /var/lib/postgresql/18/docker.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    # Not published: only the app reaches the database, over the Compose network. To use psql
+    # or a GUI from your machine, uncomment this (127.0.0.1 keeps it off your local network):
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+
+  app:
+    build: .
+    image: spendwise:local
+    depends_on:
+      db:
+        # Start only after pg_isready passes, so the startup migration can connect.
+        condition: service_healthy
+        restart: true
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-spendwise}:${POSTGRES_PASSWORD:-spendwise-local-only}@db:5432/${POSTGRES_DB:-spendwise}
+      AI_PROVIDER: ${AI_PROVIDER:-fake}
+      AI_MODEL: ${AI_MODEL:-claude-opus-5-5}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    # The image's HEALTHCHECK (GET /api/health/ready) applies; it is not redefined here.
+    restart: unless-stopped
+
+volumes:
+  pgdata:
