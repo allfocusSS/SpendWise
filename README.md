@@ -6,7 +6,11 @@ AI-powered personal finance manager (MVP). Single currency: KZT (₸).
 - **Frontend:** React + TypeScript + Tailwind CSS (Vite)
 - **AI:** Anthropic SDK behind a provider interface; a fake provider is the default so the app runs without an API key. All financial calculations happen in Python, never in the AI.
 
-> ⚠️ No authentication in the local MVP. Do not deploy publicly until authentication is implemented.
+Each person signs up with an email and password and sees only their own transactions, categories
+and analytics (see [Accounts and security](#accounts-and-security)).
+
+> ⚠️ Not deployed anywhere yet. Before a public deployment, also read
+> [Before deploying](#before-deploying).
 
 ## Quick start (Docker Compose)
 
@@ -34,7 +38,6 @@ cd backend
 cp ../.env.example .env
 uv sync
 uv run alembic upgrade head      # create/upgrade the database schema
-uv run python -m app.seed        # add default categories (only if there are none)
 uv run uvicorn app.main:app --reload
 
 # Frontend — http://localhost:5173 (proxies /api to the backend)
@@ -61,7 +64,7 @@ docker run -d --name spendwise-postgres --network spendwise \
   -p 127.0.0.1:5432:5432 -v spendwise-pgdata:/var/lib/postgresql postgres:18
 ```
 
-Point the backend at it in `backend/.env`, then migrate, seed and run as usual:
+Point the backend at it in `backend/.env`, then migrate and run as usual:
 
 ```bash
 # backend/.env
@@ -69,7 +72,6 @@ DATABASE_URL=postgresql+psycopg://spendwise:<password>@localhost:5432/spendwise
 
 cd backend
 uv run alembic upgrade head
-uv run python -m app.seed
 uv run uvicorn app.main:app --reload
 ```
 
@@ -111,8 +113,8 @@ docker compose down              # stop and remove the containers; the database 
 ```
 
 **Startup order.** `db` is healthy once `pg_isready` succeeds. Only then does Compose start `app`,
-which runs `alembic upgrade head`, seeds the default categories (only into an empty table), and
-starts Uvicorn. `app` is healthy once `GET /api/health/ready` (the image's own health check)
+which runs `alembic upgrade head` and starts Uvicorn (default categories are created per account
+at signup). `app` is healthy once `GET /api/health/ready` (the image's own health check)
 reaches the database. Both services use `restart: unless-stopped`: they restart after a crash or
 a Docker restart, but stay down after `docker compose stop` or `down`. If `db` is restarted with
 Compose, `app` is restarted after it.
@@ -135,6 +137,8 @@ variables) or export it in your shell:
 | `POSTGRES_USER` | `spendwise` | database user |
 | `POSTGRES_PASSWORD` | `spendwise-local-only` | database password; letters, digits, `-` `_` `.` only (it goes into `DATABASE_URL`) |
 | `APP_PORT` | `8000` | port on 127.0.0.1 where the app is published |
+| `SESSION_COOKIE_SECURE` | `false` | `true` sends the session cookie over HTTPS only; this stack is plain HTTP on localhost |
+| `SESSION_TTL_DAYS` | `14` | how long a sign-in lasts |
 | `AI_PROVIDER` / `AI_MODEL` / `ANTHROPIC_API_KEY` | `fake` / `claude-opus-5-5` / empty | passed to the app; see [AI providers](#ai-providers) |
 
 Compose sets `ENVIRONMENT=production` and builds `DATABASE_URL`
@@ -146,8 +150,8 @@ The default password is only for this local stack: the database is not published
 Compose network. To connect with `psql` or a GUI, uncomment the `ports` lines under `db` in
 `compose.yaml` (they bind to 127.0.0.1 only).
 
-> ⚠️ No authentication yet. The app is published on 127.0.0.1 only; do not deploy this stack or
-> expose it publicly.
+> ⚠️ This stack is for local use: plain HTTP, a default database password and port 8000 on
+> 127.0.0.1 only. Do not deploy it as is; see [Before deploying](#before-deploying).
 
 ## Docker image without Compose
 
@@ -162,12 +166,15 @@ The image needs a PostgreSQL `DATABASE_URL`. With the `spendwise-postgres` conta
 docker build -t spendwise .
 docker run --rm --network spendwise -p 127.0.0.1:8000:8000 \
   -e DATABASE_URL="postgresql+psycopg://spendwise:$SPENDWISE_DB_PASSWORD@spendwise-postgres:5432/spendwise" \
+  -e SESSION_COOKIE_SECURE=false \
   spendwise
 # http://127.0.0.1:8000  (API under /api, docs at /docs)
 ```
 
-- On start the container runs `alembic upgrade head`, seeds the default categories (only when the
-  categories table is empty), then starts Uvicorn on `0.0.0.0:8000` (`backend/scripts/start.sh`).
+- On start the container runs `alembic upgrade head`, then starts Uvicorn on `0.0.0.0:8000`
+  (`backend/scripts/start.sh`).
+- The image runs with `ENVIRONMENT=production`, so the session cookie is `Secure` (HTTPS only)
+  unless `SESSION_COOKIE_SECURE=false` is set, as above for plain HTTP on localhost.
 - The image sets `ENVIRONMENT=production` and has no `DATABASE_URL` default: without a PostgreSQL
   URL it exits at once with an error. If PostgreSQL is not reachable yet, the migration fails and
   the container exits; start the database first or add `--restart on-failure`.
@@ -177,8 +184,78 @@ docker run --rm --network spendwise -p 127.0.0.1:8000:8000 \
 - AI settings come from environment variables (`-e AI_PROVIDER=...`); no `.env` file is copied
   into the image.
 
-> ⚠️ No authentication yet. Publish the port on `127.0.0.1` only, as above, and do not deploy the
-> image publicly.
+> ⚠️ Not deployed yet; see [Before deploying](#before-deploying).
+
+## Accounts and security
+
+**Sign-in flow.** `POST /api/auth/signup` (email + password) creates an account and signs in;
+`POST /api/auth/login` signs in; `POST /api/auth/logout` signs out; `GET /api/auth/me` returns
+the signed-in user (`id`, `email`, `created_at`) or 401. Every other route except
+`/api/health` needs a session and answers `401 {"detail": "Not authenticated"}` without one.
+The frontend shows Log in and Create account pages and sends signed-out visitors there; after
+signing in they return to the page they asked for.
+
+**Passwords.** 12 to 128 characters, no other rules. Stored only as Argon2id hashes
+(`argon2-cffi`, RFC 9106 low-memory parameters: 64 MiB, 3 passes, 4 lanes, random salt per
+hash); hashes made with older parameters are upgraded at the next login. Passwords and hashes
+never appear in API responses, logs or validation errors (`/api/auth/*` 422s omit the submitted
+values). A wrong password and an unknown email get the same `401 Invalid email or password`,
+and both run a full hash check so they take about as long.
+
+**Sessions.** The session is a random 256-bit token in an `HttpOnly` cookie named
+`spendwise_session` (`SameSite=Lax`, `Path=/`, host-only, `Max-Age` = `SESSION_TTL_DAYS`, default
+14). JavaScript cannot read it and nothing is stored in `localStorage`. The database keeps only
+the token's SHA-256, so a copy of the `sessions` table cannot be used to sign in. Logging out
+deletes the session on the server, so a copied cookie stops working too. Each login issues a new
+token and ends the browser's previous session. The cookie is `Secure` when
+`ENVIRONMENT=production`, unless `SESSION_COOKIE_SECURE` says otherwise.
+
+**Cross-site requests.** `SameSite=Lax` keeps the cookie off cross-site `POST`, `PUT`, `PATCH` and
+`DELETE` requests, and JSON bodies are only accepted with `Content-Type: application/json`, which a
+cross-site HTML form cannot send. No CORS is configured, so other origins cannot call the API
+with the cookie.
+
+**Ownership.** Every transaction and every category belongs to one user (`user_id`, required).
+Each new account gets its own copy of the default categories, so renaming or deleting a default
+only affects that account. Every query filters by the signed-in user in the backend; another
+user's transaction or category answers exactly like one that does not exist (404, or 422
+"Category N does not exist" when used in a transaction). The database also refuses a
+transaction whose category belongs to someone else (composite foreign key on
+`(category_id, user_id)`). Analytics only ever read the signed-in user's transactions. The owner
+can never be chosen through the request: bodies with `user_id` are rejected and query
+parameters or headers are ignored.
+
+### Accounts and existing data
+
+Data created before accounts existed has no owner, and there is no safe way to guess one, so it
+is never assigned to anybody automatically. The migration that adds accounts (`0002`) checks the
+database first:
+
+- **Only the original default categories:** they are removed (every account now gets its own
+  copy) and the upgrade continues.
+- **Any transactions or custom categories:** the upgrade stops with an error and changes nothing.
+  The app does not start until the database is reset. Back up anything you need first
+  (for example `docker compose exec db pg_dump -U spendwise spendwise > backup.sql`, or copy
+  `backend/spendwise.db`), then reset:
+
+  ```bash
+  docker compose down -v          # Docker Compose: deletes the local PostgreSQL volume
+  rm backend/spendwise.db         # local SQLite development database
+  ```
+
+  Then sign up and re-enter the data. There is no import tool.
+
+Downgrading below `0002` deletes all users, sessions, categories and transactions.
+
+### Before deploying
+
+Accounts and per-user isolation are in place, but this MVP has not been deployed. A public
+deployment also needs:
+
+- HTTPS in front of the app, with `SESSION_COOKIE_SECURE` left unset or `true`;
+- a real database password (not the Compose default) and backups;
+- rate limiting on `/api/auth/login` and `/api/auth/signup` at the reverse proxy: the app does
+  not limit login attempts itself.
 
 ## Money and API conventions
 

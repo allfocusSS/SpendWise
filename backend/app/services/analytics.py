@@ -84,12 +84,14 @@ def build_monthly_trend(
 # ---------------------------------------------------------------------------
 
 
-def get_summary(db: Session, date_from: date | None = None, date_to: date | None = None) -> Summary:
+def get_summary(
+    db: Session, user_id: int, date_from: date | None = None, date_to: date | None = None
+) -> Summary:
     query = apply_filters(
         select(
             Transaction.type, func.sum(Transaction.amount_cents), func.count(Transaction.id)
         ).group_by(Transaction.type),
-        TransactionFilters(date_from=date_from, date_to=date_to),
+        TransactionFilters(user_id=user_id, date_from=date_from, date_to=date_to),
     )
     sums = {TransactionType.INCOME: 0, TransactionType.EXPENSE: 0}
     count = 0
@@ -112,6 +114,7 @@ def get_summary(db: Session, date_from: date | None = None, date_to: date | None
 
 def get_category_breakdown(
     db: Session,
+    user_id: int,
     type_: TransactionType = TransactionType.EXPENSE,
     date_from: date | None = None,
     date_to: date | None = None,
@@ -120,9 +123,10 @@ def get_category_breakdown(
     query = apply_filters(
         select(Category.id, Category.name, Category.color, total_col, func.count(Transaction.id))
         .join(Transaction.category)
+        .where(Category.user_id == user_id)
         .group_by(Category.id, Category.name, Category.color)
         .order_by(total_col.desc(), Category.name),
-        TransactionFilters(date_from=date_from, date_to=date_to, type=type_),
+        TransactionFilters(user_id=user_id, date_from=date_from, date_to=date_to, type=type_),
     )
     rows = [(cid, name, color, int(total), n) for cid, name, color, total, n in db.execute(query)]
     grand_total = sum(row[3] for row in rows)
@@ -146,7 +150,9 @@ def get_category_breakdown(
     )
 
 
-def get_monthly_trend(db: Session, months: int = 6, until: date | None = None) -> MonthlyTrend:
+def get_monthly_trend(
+    db: Session, user_id: int, months: int = 6, until: date | None = None
+) -> MonthlyTrend:
     until = until or date.today()
     month_list = month_starts(until, months)
     period_start, period_end = month_list[0], next_month_start(month_list[-1])
@@ -155,7 +161,11 @@ def get_monthly_trend(db: Session, months: int = 6, until: date | None = None) -
     month_col = extract("month", Transaction.occurred_on)
     query = (
         select(year_col, month_col, Transaction.type, func.sum(Transaction.amount_cents))
-        .where(Transaction.occurred_on >= period_start, Transaction.occurred_on < period_end)
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.occurred_on >= period_start,
+            Transaction.occurred_on < period_end,
+        )
         .group_by(year_col, month_col, Transaction.type)
     )
     totals = {

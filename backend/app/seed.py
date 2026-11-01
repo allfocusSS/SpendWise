@@ -1,7 +1,6 @@
-"""Default categories. Run with:  uv run python -m app.seed
+"""Default categories, copied into every new account at signup (see app.services.auth).
 
-Seeding only happens when the categories table is empty, so categories a user deleted
-do not come back every time the command runs.
+Each user owns their copy, so renaming or deleting a default only affects that user.
 """
 
 from sqlalchemy import func, select
@@ -26,21 +25,17 @@ DEFAULT_CATEGORIES: list[tuple[str, TransactionType, str]] = [
 ]
 
 
-def seed_default_categories(db: Session) -> int:
-    """Insert the default categories if there are none. Returns how many were added."""
-    if (db.scalar(select(func.count(Category.id))) or 0) > 0:
+def seed_default_categories(db: Session, user_id: int) -> int:
+    """Add the default categories for a user who has none. Returns how many were added.
+
+    Does not commit: account creation commits the user and their categories together.
+    """
+    existing = db.scalar(select(func.count(Category.id)).where(Category.user_id == user_id))
+    if existing:
         return 0
     db.add_all(
-        Category(name=name, type=type_, color=color, is_default=True)
+        Category(user_id=user_id, name=name, type=type_, color=color, is_default=True)
         for name, type_, color in DEFAULT_CATEGORIES
     )
-    db.commit()
+    db.flush()
     return len(DEFAULT_CATEGORIES)
-
-
-if __name__ == "__main__":
-    from app.core.db import SessionLocal
-
-    with SessionLocal() as session:
-        added = seed_default_categories(session)
-    print(f"Seeded {added} default categories." if added else "Categories exist; nothing seeded.")

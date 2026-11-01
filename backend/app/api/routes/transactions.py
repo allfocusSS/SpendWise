@@ -1,10 +1,9 @@
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Query, status
 
-from app.core.db import get_db
+from app.api.deps import UNAUTHORIZED, CurrentUser, DbSession
 from app.models import TransactionType
 from app.schemas.common import ErrorResponse
 from app.schemas.transaction import (
@@ -16,15 +15,15 @@ from app.schemas.transaction import (
 from app.services import transactions as service
 from app.services.transactions import TransactionFilters
 
-router = APIRouter(prefix="/transactions", tags=["transactions"])
-
-DbSession = Annotated[Session, Depends(get_db)]
+# Every route needs a signed-in user and only sees that user's transactions.
+router = APIRouter(prefix="/transactions", tags=["transactions"], responses=UNAUTHORIZED)
 NOT_FOUND = {404: {"model": ErrorResponse}}
 
 
 @router.get("", response_model=TransactionList)
 def list_transactions(
     db: DbSession,
+    user: CurrentUser,
     date_from: date | None = None,
     date_to: date | None = None,
     type_: Annotated[TransactionType | None, Query(alias="type")] = None,
@@ -33,27 +32,29 @@ def list_transactions(
     offset: Annotated[int, Query(ge=0)] = 0,
 ):
     filters = TransactionFilters(
-        date_from=date_from, date_to=date_to, type=type_, category_id=category_id
+        user_id=user.id, date_from=date_from, date_to=date_to, type=type_, category_id=category_id
     )
     items, total = service.list_transactions(db, filters, limit, offset)
     return TransactionList(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.post("", response_model=TransactionRead, status_code=status.HTTP_201_CREATED)
-def create_transaction(data: TransactionCreate, db: DbSession):
-    return service.create_transaction(db, data)
+def create_transaction(data: TransactionCreate, db: DbSession, user: CurrentUser):
+    return service.create_transaction(db, user.id, data)
 
 
 @router.get("/{transaction_id}", response_model=TransactionRead, responses=NOT_FOUND)
-def get_transaction(transaction_id: int, db: DbSession):
-    return service.get_transaction(db, transaction_id)
+def get_transaction(transaction_id: int, db: DbSession, user: CurrentUser):
+    return service.get_transaction(db, user.id, transaction_id)
 
 
 @router.put("/{transaction_id}", response_model=TransactionRead, responses=NOT_FOUND)
-def update_transaction(transaction_id: int, data: TransactionUpdate, db: DbSession):
-    return service.update_transaction(db, transaction_id, data)
+def update_transaction(
+    transaction_id: int, data: TransactionUpdate, db: DbSession, user: CurrentUser
+):
+    return service.update_transaction(db, user.id, transaction_id, data)
 
 
 @router.delete("/{transaction_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOT_FOUND)
-def delete_transaction(transaction_id: int, db: DbSession) -> None:
-    service.delete_transaction(db, transaction_id)
+def delete_transaction(transaction_id: int, db: DbSession, user: CurrentUser) -> None:
+    service.delete_transaction(db, user.id, transaction_id)

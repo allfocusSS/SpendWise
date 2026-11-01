@@ -44,6 +44,80 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/signup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Signup
+         * @description Create an account (with its own default categories) and sign in.
+         */
+        post: operations["signup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Login */
+        post: operations["login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Logout
+         * @description End this session. Safe to call when not signed in.
+         */
+        post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Me */
+        get: operations["me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/categories": {
         parameters: {
             query?: never;
@@ -258,6 +332,19 @@ export interface components {
             /** Status */
             status: string;
         };
+        /**
+         * LoginRequest
+         * @description No format or policy checks: a wrong email or password is simply "invalid" (401).
+         */
+        LoginRequest: {
+            /** Email */
+            email: string;
+            /**
+             * Password
+             * Format: password
+             */
+            password: string;
+        };
         /** MonthlyTrend */
         MonthlyTrend: {
             /** Months */
@@ -282,6 +369,19 @@ export interface components {
              * @description Amount in tiyn (1 KZT = 100 tiyn).
              */
             net_cents: number;
+        };
+        /** SignupRequest */
+        SignupRequest: {
+            /**
+             * Email
+             * Format: email
+             */
+            email: string;
+            /**
+             * Password
+             * Format: password
+             */
+            password: string;
         };
         /** Summary */
         Summary: {
@@ -403,6 +503,21 @@ export interface components {
             /** @default manual */
             source?: components["schemas"]["TransactionSource"];
         };
+        /**
+         * UserRead
+         * @description The signed-in user. Never includes the password hash.
+         */
+        UserRead: {
+            /** Id */
+            id: number;
+            /** Email */
+            email: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -474,6 +589,137 @@ export interface operations {
             };
         };
     };
+    signup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SignupRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserRead"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserRead"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    logout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    me: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserRead"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     list_categories: {
         parameters: {
             query?: {
@@ -492,6 +738,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CategoryRead"][];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Validation Error */
@@ -525,6 +780,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CategoryRead"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Conflict */
@@ -567,6 +831,15 @@ export interface operations {
                     "application/json": components["schemas"]["CategoryRead"];
                 };
             };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Not Found */
             404: {
                 headers: {
@@ -604,6 +877,15 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
             };
             /** @description Not Found */
             404: {
@@ -656,6 +938,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CategoryRead"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Not Found */
@@ -712,6 +1003,15 @@ export interface operations {
                     "application/json": components["schemas"]["TransactionList"];
                 };
             };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -745,6 +1045,15 @@ export interface operations {
                     "application/json": components["schemas"]["TransactionRead"];
                 };
             };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -774,6 +1083,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TransactionRead"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Not Found */
@@ -820,6 +1138,15 @@ export interface operations {
                     "application/json": components["schemas"]["TransactionRead"];
                 };
             };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Not Found */
             404: {
                 headers: {
@@ -857,6 +1184,15 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
             };
             /** @description Not Found */
             404: {
@@ -899,6 +1235,15 @@ export interface operations {
                     "application/json": components["schemas"]["Summary"];
                 };
             };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -932,6 +1277,15 @@ export interface operations {
                     "application/json": components["schemas"]["CategoryBreakdown"];
                 };
             };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -963,6 +1317,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MonthlyTrend"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Validation Error */

@@ -5,8 +5,8 @@
 #   docker compose down -v       # stop and DELETE the local database (the "pgdata" volume)
 #
 # Settings are read from the shell or from a .env file next to this file (see .env.example,
-# "Docker Compose"). The defaults are for local development only. There is no authentication
-# yet: do not deploy this stack or expose it publicly.
+# "Docker Compose"). The defaults are for local development only (plain HTTP, a default database
+# password): do not deploy this stack as is. See README, "Before deploying".
 
 name: spendwise
 
@@ -49,6 +49,10 @@ services:
       AI_PROVIDER: ${AI_PROVIDER:-fake}
       AI_MODEL: ${AI_MODEL:-claude-opus-5-5}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # The stack is served over plain HTTP on localhost, so the session cookie cannot be
+      # HTTPS-only here. Behind HTTPS, set SESSION_COOKIE_SECURE=true.
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-14}
     ports:
       - "127.0.0.1:${APP_PORT:-8000}:8000"
     # The image's HEALTHCHECK (GET /api/health/ready) applies; it is not redefined here.

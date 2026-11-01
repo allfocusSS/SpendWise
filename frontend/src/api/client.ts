@@ -19,6 +19,9 @@ export type TransactionType = Schemas['TransactionType']
 export type Summary = Schemas['Summary']
 export type CategoryBreakdown = Schemas['CategoryBreakdown']
 export type MonthlyTrend = Schemas['MonthlyTrend']
+export type User = Schemas['UserRead']
+export type SignupRequest = Schemas['SignupRequest']
+export type LoginRequest = Schemas['LoginRequest']
 
 type QueryOf<P extends keyof paths> = NonNullable<
   paths[P] extends { get: { parameters: { query?: infer Q } } } ? Q : never
@@ -95,6 +98,7 @@ export function toApiError(status: number, body: unknown): ApiError {
 }
 
 function defaultMessage(status: number): string {
+  if (status === 401) return 'Please log in to continue.'
   if (status === 404) return 'Not found.'
   if (status >= 500) return 'The server had a problem. Please try again.'
   return `Request failed (HTTP ${status}).`
@@ -125,6 +129,9 @@ export async function request<T>(
   try {
     response = await fetch(`/api${path}${buildQuery(options.query)}`, {
       method: options.method ?? 'GET',
+      // The session is an HttpOnly cookie set by the backend; the browser attaches it to
+      // same-origin requests. No token is ever read or stored by JavaScript.
+      credentials: 'same-origin',
       headers: options.body === undefined ? undefined : { 'Content-Type': 'application/json' },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     })
@@ -147,7 +154,22 @@ export async function request<T>(
 // Endpoints
 // ---------------------------------------------------------------------------
 
+/** The signed-in user, or null when there is no valid session (401). */
+async function getCurrentUser(): Promise<User | null> {
+  try {
+    return await request<User>('/auth/me')
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) return null
+    throw error
+  }
+}
+
 export const api = {
+  getCurrentUser,
+  signup: (body: SignupRequest) => request<User>('/auth/signup', { method: 'POST', body }),
+  login: (body: LoginRequest) => request<User>('/auth/login', { method: 'POST', body }),
+  logout: () => request<void>('/auth/logout', { method: 'POST' }),
+
   listCategories: (type?: TransactionType) =>
     request<Category[]>('/categories', { query: { type } }),
   createCategory: (body: CategoryCreate) =>
