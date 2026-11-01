@@ -37,3 +37,4 @@ frontend/playwright-report
 # Docker files themselves
 Dockerfile
 .dockerignore
+compose.yaml

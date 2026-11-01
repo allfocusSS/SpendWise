@@ -8,7 +8,20 @@ AI-powered personal finance manager (MVP). Single currency: KZT (₸).
 
 > ⚠️ No authentication in the local MVP. Do not deploy publicly until authentication is implemented.
 
+## Quick start (Docker Compose)
+
+Runs the whole stack (PostgreSQL 18 + the app) with Docker only; no Python or Node needed:
+
+```bash
+docker compose up --build        # open http://localhost:8000 (API docs at /docs)
+docker compose down              # stop; your data is kept
+```
+
+See [Docker Compose](#docker-compose) for configuration and how to reset the database.
+
 ## Prerequisites
+
+For development without Docker:
 
 - Python 3.13 + [uv](https://docs.astral.sh/uv/)
 - Node.js 24
@@ -80,10 +93,67 @@ TEST_DATABASE_URL=postgresql+psycopg://spendwise:<password>@localhost:5432/spend
 Every test creates and drops all tables, so the database name must contain `test`. Never point
 it at a database with real data. CI runs the suite on both SQLite and PostgreSQL.
 
-## Docker (single production container)
+## Docker Compose
+
+`compose.yaml` runs two services on a private Compose network:
+
+| Service | What it is | Reachable from your machine |
+|---|---|---|
+| `db` | `postgres:18`, data in the named volume `pgdata` | No (port not published) |
+| `app` | the production image built from `Dockerfile` (UI + API) | `http://localhost:8000` (127.0.0.1 only) |
+
+```bash
+docker compose up --build        # build and start in the foreground (Ctrl+C stops it)
+docker compose up --build -d     # or in the background
+docker compose logs -f app       # follow the app logs
+docker compose ps                # status and health
+docker compose down              # stop and remove the containers; the database volume is kept
+```
+
+**Startup order.** `db` is healthy once `pg_isready` succeeds. Only then does Compose start `app`,
+which runs `alembic upgrade head`, seeds the default categories (only into an empty table), and
+starts Uvicorn. `app` is healthy once `GET /api/health/ready` (the image's own health check)
+reaches the database. Both services use `restart: unless-stopped`: they restart after a crash or
+a Docker restart, but stay down after `docker compose stop` or `down`. If `db` is restarted with
+Compose, `app` is restarted after it.
+
+**Persistence.** Data lives in the Docker volume `spendwise_pgdata` and survives
+`docker compose down` and `up`, rebuilds and restarts. To delete the local database completely
+and start again from an empty one:
+
+```bash
+docker compose down -v           # removes the containers AND the spendwise_pgdata volume
+```
+
+**Configuration.** Everything has a local-development default, so no setup is needed. To change
+a value, put it in a `.env` file at the repo root (it is git-ignored; `.env.example` lists the
+variables) or export it in your shell:
+
+| Variable | Default | Used for |
+|---|---|---|
+| `POSTGRES_DB` | `spendwise` | database name |
+| `POSTGRES_USER` | `spendwise` | database user |
+| `POSTGRES_PASSWORD` | `spendwise-local-only` | database password; letters, digits, `-` `_` `.` only (it goes into `DATABASE_URL`) |
+| `APP_PORT` | `8000` | port on 127.0.0.1 where the app is published |
+| `AI_PROVIDER` / `AI_MODEL` / `ANTHROPIC_API_KEY` | `fake` / `claude-opus-5-5` / empty | passed to the app; see [AI providers](#ai-providers) |
+
+Compose sets `ENVIRONMENT=production` and builds `DATABASE_URL`
+(`postgresql+psycopg://USER:PASSWORD@db:5432/DB`) for the app itself. PostgreSQL applies the
+credentials only when the volume is first created; after changing them, run
+`docker compose down -v` (this deletes the local data) and start again.
+
+The default password is only for this local stack: the database is not published outside the
+Compose network. To connect with `psql` or a GUI, uncomment the `ports` lines under `db` in
+`compose.yaml` (they bind to 127.0.0.1 only).
+
+> ⚠️ No authentication yet. The app is published on 127.0.0.1 only; do not deploy this stack or
+> expose it publicly.
+
+## Docker image without Compose
 
 The `Dockerfile` at the repo root builds one image: Node builds the React app to static files,
-and FastAPI serves them alongside the API on port 8000.
+and FastAPI serves them alongside the API on port 8000. Compose (above) uses this image; the
+commands below run it by hand against a PostgreSQL you manage yourself.
 
 The image needs a PostgreSQL `DATABASE_URL`. With the `spendwise-postgres` container from
 [Run PostgreSQL locally](#run-postgresql-locally) on the `spendwise` network:
