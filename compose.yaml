@@ -37,7 +37,9 @@ services:
 
   app:
     build: .
-    image: spendwise:local
+    # Tag for the built image. The integration tests use their own tag so they never replace
+    # the image of your local stack.
+    image: ${SPENDWISE_IMAGE:-spendwise:local}
     depends_on:
       db:
         # Start only after pg_isready passes, so the startup migration can connect.
