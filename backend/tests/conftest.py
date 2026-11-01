@@ -6,6 +6,8 @@ import os
 # Tests that check provider selection set their own values with monkeypatch.
 os.environ["AI_PROVIDER"] = "fake"
 os.environ["ANTHROPIC_API_KEY"] = ""
+# The backend serves no frontend in tests unless a test mounts one (see test_frontend_serving.py).
+os.environ["FRONTEND_DIST"] = ""
 
 from collections.abc import Iterator  # noqa: E402
 
