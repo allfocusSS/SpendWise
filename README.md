@@ -139,6 +139,7 @@ variables) or export it in your shell:
 | `APP_PORT` | `8000` | port on 127.0.0.1 where the app is published |
 | `SESSION_COOKIE_SECURE` | `false` | `true` sends the session cookie over HTTPS only; this stack is plain HTTP on localhost |
 | `SESSION_TTL_DAYS` | `14` | how long a sign-in lasts |
+| `SPENDWISE_IMAGE` | `spendwise:local` | tag for the built app image (the integration tests use their own) |
 | `AI_PROVIDER` / `AI_MODEL` / `ANTHROPIC_API_KEY` | `fake` / `claude-opus-5-5` / empty | passed to the app; see [AI providers](#ai-providers) |
 
 Compose sets `ENVIRONMENT=production` and builds `DATABASE_URL`
@@ -370,6 +371,73 @@ cd frontend && npm run generate:api                     # 2. regenerate src/api/
 
 CI fails if either the spec or the generated TypeScript types are out of date.
 
+## Integration tests (real Docker Compose stack)
+
+`backend/integration/` tests the whole stack the way it runs in Docker: the built frontend,
+FastAPI and PostgreSQL from `compose.yaml`. Every check is a real HTTP request to the running
+app; nothing is mocked, and every user signs up and logs in through `/api/auth`.
+
+```bash
+make integration                          # from the repo root
+# or, without make:
+cd backend && uv run pytest integration
+# extra pytest options:
+make integration ARGS="-k analytics -x"
+```
+
+Needs Docker with Compose v2 and uv; Node and Python are only needed inside the image build.
+
+**What a run does.**
+
+1. Builds the image and starts its own stack with `docker compose up --build --wait`, and checks
+   that PostgreSQL and the app are healthy and that the app started only after PostgreSQL was.
+2. Runs the scenarios below; each test signs up new users with unique emails.
+3. Removes the stack with `docker compose down --volumes`, even when tests fail. On failure it
+   prints the last 200 lines of the container logs first.
+
+**Covered.**
+
+- the stack: health, start order, published ports, PostgreSQL in use, the built frontend and
+  its bundles, `/api/health`, `/api/health/ready`, `/docs`, 401 on every data route without a
+  session, JSON 404 for unknown API paths;
+- auth: signup (cookie attributes), duplicate email, weak password, login, a session that
+  persists across requests and browsers, invalid logins, `/me`, logout (a copied cookie stops
+  working);
+- categories: per-user defaults, filtering, create, rename and delete, duplicate names;
+- transactions: create income and expense, list order, filters, pagination, validation, update,
+  delete, a category in use cannot be deleted;
+- analytics: summary, period summary, income and expense breakdowns and monthly trend against a
+  known ledger with hand-computed totals;
+- isolation between two users: reading, changing or deleting another user's transactions and
+  categories, using their categories, owner fields in bodies, owner query parameters and
+  headers, guessing ids, and analytics;
+- persistence: data, accounts and sessions survive `docker compose down` and `up` with the
+  volume kept (this test runs last because it restarts the stack).
+
+**Isolation from your machine.** The tests use their own Compose project (`spendwise-it`),
+port (18000) and image tag (`spendwise:integration`), so a local `spendwise` stack, its data and
+its `spendwise:local` image are never touched. `docker compose` runs with a cleaned
+environment and an empty env file: a repo-root `.env` or shell variables such as
+`POSTGRES_PASSWORD` have no effect. The database password is random for each run.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SPENDWISE_IT_PORT` | `18000` | port on 127.0.0.1 for the test stack |
+| `SPENDWISE_IT_PROJECT` | `spendwise-it` | Compose project name |
+| `SPENDWISE_IT_IMAGE` | `spendwise:integration` | tag for the image built for the tests |
+| `SPENDWISE_IT_TIMEOUT` | `600` | seconds to wait for the services to become healthy (build not counted) |
+| `SPENDWISE_IT_KEEP` | unset | `1` leaves the stack running afterwards for debugging; remove it with `docker compose -p spendwise-it down -v` |
+
+The built `spendwise:integration` image is kept between runs so later builds are faster; remove
+it with `docker image rm spendwise:integration`.
+
+**In CI** (GitHub Actions `ubuntu-latest` has Docker and Compose v2):
+
+```yaml
+- uses: astral-sh/setup-uv@v6
+- run: make integration
+```
+
 ## Checks
 
 ```bash
@@ -378,4 +446,7 @@ cd frontend && npm run lint && npm test && npm run build
 
 # Optional: the backend suite on PostgreSQL (see "Run the tests on PostgreSQL")
 cd backend && TEST_DATABASE_URL=postgresql+psycopg://... uv run pytest
+
+# Integration tests against the real Docker Compose stack (see above)
+make integration
 ```

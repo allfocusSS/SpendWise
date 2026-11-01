@@ -26,6 +26,7 @@
 **/.coverage
 **/htmlcov
 backend/tests
+backend/integration
 
 # Node / frontend (the image builds its own node_modules and dist)
 **/node_modules
