@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1
+
+# SpendWise production image. The React app is built to static files and served by FastAPI,
+# so one container serves the UI and the API (/api) on port 8000.
+#
+#   docker build -t spendwise .
+#   docker run --rm -p 127.0.0.1:8000:8000 -v spendwise-data:/app/data spendwise
+#
+# There is no authentication yet: do not expose this container publicly.
+
+# ---- 1. Frontend build (Node) ----
+FROM node:24-slim AS frontend
+WORKDIR /build/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+# `tsc -b` type-checks a test that imports the committed spec from ../openapi.
+COPY openapi/ /build/openapi/
+RUN npm run build
+
+# ---- 2. Python dependencies (uv, locked, no dev tools) ----
+FROM python:3.13-slim AS backend-deps
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /bin/uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0
+WORKDIR /app
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project
+
+# ---- 3. Runtime (Python + FastAPI) ----
+FROM python:3.13-slim AS runtime
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/.venv/bin:$PATH" \
+    ENVIRONMENT=production \
+    DATABASE_URL=sqlite:////app/data/spendwise.db \
+    FRONTEND_DIST=/app/frontend_dist
+
+RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin spendwise
+WORKDIR /app
+
+COPY --from=backend-deps /app/.venv ./.venv
+COPY backend/alembic.ini ./
+COPY backend/alembic ./alembic
+COPY backend/app ./app
+COPY --chmod=0755 backend/scripts/start.sh ./start.sh
+COPY --from=frontend /build/frontend/dist ./frontend_dist
+
+# The SQLite database lives here; mount a volume to keep it across containers.
+RUN mkdir -p /app/data && chown spendwise:spendwise /app/data
+VOLUME ["/app/data"]
+
+USER spendwise
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=4)"]
+
+CMD ["./start.sh"]

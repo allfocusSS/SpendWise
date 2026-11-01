@@ -1,0 +1,39 @@
+# Keep the build context small and free of secrets and local state.
+# The Dockerfile copies only what it needs; this also keeps everything else out of the context.
+
+# Secrets and local configuration
+**/.env
+**/.env.*
+
+# Version control, CI and editor/agent settings
+.git
+.github
+.claude
+.idea
+.vscode
+**/.DS_Store
+
+# Local databases
+**/*.db
+**/*.sqlite3
+
+# Python
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.coverage
+**/htmlcov
+backend/tests
+
+# Node / frontend (the image builds its own node_modules and dist)
+**/node_modules
+**/dist
+frontend/test-results
+frontend/playwright-report
+**/*.log
+
+# Docker files themselves
+Dockerfile
+.dockerignore

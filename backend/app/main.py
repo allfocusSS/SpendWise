@@ -4,6 +4,7 @@ from fastapi.routing import APIRoute
 from app.api.routes import analytics, categories, health, transactions
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
+from app.core.frontend import mount_frontend
 
 
 def _operation_id(route: APIRoute) -> str:
@@ -21,6 +22,9 @@ def create_app() -> FastAPI:
     register_error_handlers(app)
     for module in (health, categories, transactions, analytics):
         app.include_router(module.router, prefix="/api")
+    if settings.frontend_dist is not None:
+        # Production image: the built React app is served from the same origin as the API.
+        mount_frontend(app, settings.frontend_dist)
     return app
 
 

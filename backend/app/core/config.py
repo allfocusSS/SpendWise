@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import SecretStr, field_validator
@@ -14,6 +15,9 @@ class Settings(BaseSettings):
     environment: Literal["local", "test", "production"] = "local"
     database_url: str = "sqlite:///./spendwise.db"
     currency: str = "KZT"
+    # Directory of the built frontend (Vite `dist`). Set in the Docker image; unset locally,
+    # where the Vite dev server serves the frontend.
+    frontend_dist: Path | None = None
 
     # AI: the app must work without a real key, so "fake" is the default.
     # An unknown AI_PROVIDER value fails at startup with a message listing the allowed values.
@@ -29,10 +33,10 @@ class Settings(BaseSettings):
         # Accept "Fake", " FAKE " etc.; the Literal check above still rejects unknown names.
         return value.strip().lower() if isinstance(value, str) else value
 
-    @field_validator("anthropic_api_key", mode="before")
+    @field_validator("anthropic_api_key", "frontend_dist", mode="before")
     @classmethod
-    def _blank_key_is_none(cls, value: object) -> object:
-        # ANTHROPIC_API_KEY= (empty, as in .env.example) means "not set".
+    def _blank_is_none(cls, value: object) -> object:
+        # ANTHROPIC_API_KEY= (empty, as in .env.example) means "not set"; same for FRONTEND_DIST.
         return None if isinstance(value, str) and not value.strip() else value
 
 

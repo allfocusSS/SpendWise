@@ -2,7 +2,7 @@
 
 AI-powered personal finance manager (MVP). Single currency: KZT (₸).
 
-- **Backend:** FastAPI + SQLAlchemy (SQLite locally, PostgreSQL in Docker)
+- **Backend:** FastAPI + SQLAlchemy (SQLite; PostgreSQL planned)
 - **Frontend:** React + TypeScript + Tailwind CSS (Vite)
 - **AI:** Anthropic SDK behind a provider interface; a fake provider is the default so the app runs without an API key. All financial calculations happen in Python, never in the AI.
 
@@ -29,6 +29,29 @@ cd frontend
 npm install
 npm run dev
 ```
+
+## Docker (single production container)
+
+The `Dockerfile` at the repo root builds one image: Node builds the React app to static files,
+and FastAPI serves them alongside the API on port 8000.
+
+```bash
+docker build -t spendwise .
+docker run --rm -p 127.0.0.1:8000:8000 -v spendwise-data:/app/data spendwise
+# http://127.0.0.1:8000  (API under /api, docs at /docs)
+```
+
+- On start the container runs `alembic upgrade head`, seeds the default categories (only when the
+  categories table is empty), then starts Uvicorn on `0.0.0.0:8000` (`backend/scripts/start.sh`).
+- The SQLite database is `/app/data/spendwise.db`; the named volume keeps it between containers.
+- The backend serves the frontend only when `FRONTEND_DIST` is set (the image sets it). Client
+  routes such as `/transactions` return `index.html`, so a refresh works; unknown `/api/...` paths
+  still return JSON 404s.
+- AI settings come from environment variables (`-e AI_PROVIDER=...`); no `.env` file is copied
+  into the image.
+
+> ⚠️ No authentication yet. Publish the port on `127.0.0.1` only, as above, and do not deploy the
+> image publicly.
 
 ## Money and API conventions
 
