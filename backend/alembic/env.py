@@ -13,7 +13,9 @@ if config.config_file_name is not None:
 
 # Use DATABASE_URL from settings unless a URL was set explicitly (the migration test does this).
 if not config.get_main_option("sqlalchemy.url"):
-    config.set_main_option("sqlalchemy.url", get_settings().database_url)
+    # alembic.ini values use ConfigParser interpolation, so a "%" (e.g. a URL-encoded password)
+    # must be doubled.
+    config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

@@ -1,10 +1,12 @@
 # syntax=docker/dockerfile:1
 
 # SpendWise production image. The React app is built to static files and served by FastAPI,
-# so one container serves the UI and the API (/api) on port 8000.
+# so one container serves the UI and the API (/api) on port 8000. The database is PostgreSQL,
+# passed in at run time (no credentials are baked into the image):
 #
 #   docker build -t spendwise .
-#   docker run --rm -p 127.0.0.1:8000:8000 -v spendwise-data:/app/data spendwise
+#   docker run --rm -p 127.0.0.1:8000:8000 \
+#     -e DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/spendwise spendwise
 #
 # There is no authentication yet: do not expose this container publicly.
 
@@ -34,8 +36,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" \
     ENVIRONMENT=production \
-    DATABASE_URL=sqlite:////app/data/spendwise.db \
     FRONTEND_DIST=/app/frontend_dist
+# DATABASE_URL has no default: ENVIRONMENT=production refuses to start without a PostgreSQL URL.
 
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin spendwise
 WORKDIR /app
@@ -46,10 +48,6 @@ COPY backend/alembic ./alembic
 COPY backend/app ./app
 COPY --chmod=0755 backend/scripts/start.sh ./start.sh
 COPY --from=frontend /build/frontend/dist ./frontend_dist
-
-# The SQLite database lives here; mount a volume to keep it across containers.
-RUN mkdir -p /app/data && chown spendwise:spendwise /app/data
-VOLUME ["/app/data"]
 
 USER spendwise
 EXPOSE 8000
