@@ -438,6 +438,71 @@ it with `docker image rm spendwise:integration`.
 - run: make integration
 ```
 
+## End-to-end tests (Playwright)
+
+`frontend/e2e/` drives SpendWise in a real browser (headless Chromium) against the real stack:
+the production frontend build, FastAPI and PostgreSQL from `compose.yaml`. Users sign up and
+log in for real; nothing is mocked.
+
+```bash
+make e2e                                  # from the repo root
+# or, from frontend/ (after `npx playwright install chromium` once):
+npm run e2e
+# extra Playwright options, e.g. one project or one feature:
+make e2e ARGS="--project=mobile-chromium"
+make e2e ARGS="--grep Analytics"
+```
+
+Needs Docker with Compose v2, uv and Node 24. `make e2e` installs the Chromium build Playwright
+uses if it is missing.
+
+**What a run does.** Global setup starts an isolated stack through the same tooling as the
+integration tests (`uv run python -m integration.stack up` in `backend/`): its own Compose
+project `spendwise-e2e`, port 18100, image `spendwise:e2e`, a fresh volume and a random database
+password. The tests run in parallel, each with its own new user. Global teardown saves the
+container logs and removes the stack and its volume, also when tests fail. A failing test makes
+the command exit non-zero.
+
+**Coverage**, one issue per feature (label `e2e-test`, under #6):
+
+| Spec | Issue | Covers |
+|---|---|---|
+| `auth.e2e.ts` | #24 | register, refresh, log out, log in, invalid login, registration errors, protected routes and return to the requested page, HttpOnly cookie |
+| `dashboard.e2e.ts` | #25 | empty state, balance / money in / money out / net savings after new transactions, recent transactions, spending shares, refresh |
+| `transactions.e2e.ts` | #26 | create income and expense, order, type / category / date / search filters, edit, delete with confirmation, validation, refresh |
+| `categories.e2e.ts` | #27 | defaults, create, duplicate name, rename, use in a transaction, deletion rules, refresh, search |
+| `analytics.e2e.ts` | #28 | totals, spending and income breakdowns, cash-flow table, updates after a change, empty period |
+| `isolation.e2e.ts` | #6 | two browsers: no shared transactions, categories or analytics; crafted requests get 404; independent sessions |
+| `responsive.e2e.ts` | #6 | every page fits without horizontal scrolling, navigation, primary actions, transaction dialog, sign-in pages |
+
+Amounts are checked exactly as shown, in KZT with tiyn. Charts are checked through their labels
+and the table behind them, never by pixels.
+
+**Browsers and viewports.** Two Playwright projects, both Chromium: `desktop-chromium`
+(1440×900) runs everything; `mobile-chromium` (Pixel 7, 412×915, touch) runs the tests tagged
+`@mobile` (the auth journey and the responsive suite). The browser runs in the `Asia/Almaty`
+time zone so "today" and "this month" are the same everywhere.
+
+**When a test fails**, `frontend/test-results/<test>/` holds a screenshot, a Playwright trace
+(`npx playwright show-trace <path>/trace.zip`: every step, DOM snapshots, network and console),
+`browser-log.txt` (console messages, uncaught errors and HTTP errors from the page) and an
+accessibility snapshot of the page. `frontend/test-results/compose-logs.txt` has the container
+logs of the run, and `frontend/playwright-report/` has the HTML report
+(`npx playwright show-report`). No video is recorded: the trace already shows every step. A test
+also fails if the page throws an uncaught error or the server answers 5xx.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SPENDWISE_E2E_PORT` | `18100` | port on 127.0.0.1 for the test stack |
+| `SPENDWISE_E2E_PROJECT` | `spendwise-e2e` | Compose project name |
+| `SPENDWISE_E2E_IMAGE` | `spendwise:e2e` | tag for the image built for the tests |
+| `SPENDWISE_E2E_KEEP` | unset | `1` leaves the stack running afterwards; remove it with `docker compose -p spendwise-e2e down -v` |
+
+**In CI** (GitHub Actions `ubuntu-latest`): install uv and Node 24, run `npm ci` in `frontend/`,
+then `npx playwright install --with-deps chromium` and `make e2e`. Upload `frontend/test-results/`
+and `frontend/playwright-report/` as artifacts when the job fails. `CI=true` turns on one retry,
+two workers and fails on a stray `test.only`.
+
 ## Checks
 
 ```bash
@@ -449,4 +514,7 @@ cd backend && TEST_DATABASE_URL=postgresql+psycopg://... uv run pytest
 
 # Integration tests against the real Docker Compose stack (see above)
 make integration
+
+# Browser end-to-end tests against the real Docker Compose stack (see above)
+make e2e
 ```

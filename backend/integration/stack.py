@@ -1,4 +1,11 @@
-"""Drive the real Docker Compose stack (compose.yaml) for the integration tests.
+"""Drive the real Docker Compose stack (compose.yaml) for the integration and end-to-end tests.
+
+The integration tests (backend/integration) use the Stack class directly. Other runners, such as
+the Playwright suite in frontend/e2e, use the same logic through the command line:
+
+  uv run python -m integration.stack up     # build, start, wait until healthy (cleans up if not)
+  uv run python -m integration.stack logs   # recent container logs
+  uv run python -m integration.stack down   # remove the stack and its volume (unless KEEP=1)
 
 Isolation from anything on the developer's machine:
 
@@ -19,6 +26,7 @@ Settings (all optional), read from the environment of the test run:
   SPENDWISE_IT_KEEP=1    leave the stack and its volume running afterwards, for debugging
 """
 
+import contextlib
 import json
 import os
 import re
@@ -212,3 +220,39 @@ class Stack:
             return self.compose("logs", "--no-color", "--tail", str(tail), timeout=60).stdout
         except StackError as error:
             return f"(could not read logs: {error})"
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Isolated SpendWise Compose stack for tests.")
+    parser.add_argument("command", choices=["up", "down", "logs"])
+    command = parser.parse_args(argv).command
+    stack = Stack.from_env()
+
+    if command == "logs":
+        print(stack.logs(tail=500))
+        return 0
+    if command == "down":
+        if stack.keep:
+            print(f"SPENDWISE_IT_KEEP=1: stack '{stack.project}' left running at {stack.base_url}")
+        else:
+            stack.down(volumes=True)
+        return 0
+
+    try:
+        stack.check_prerequisites()
+        stack.down(volumes=True)  # leftovers from an interrupted earlier run
+        stack.up(build=True)
+    except StackError as error:
+        print(f"The Compose stack did not start:\n{error}\n--- logs ---\n{stack.logs()}")
+        if not stack.keep:
+            with contextlib.suppress(StackError):
+                stack.down(volumes=True)
+        return 1
+    print(f"Stack '{stack.project}' is healthy at {stack.base_url}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

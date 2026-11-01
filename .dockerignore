@@ -33,6 +33,7 @@ backend/integration
 **/dist
 frontend/test-results
 frontend/playwright-report
+frontend/blob-report
 **/*.log
 
 # Docker files themselves
