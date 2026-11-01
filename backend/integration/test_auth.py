@@ -28,6 +28,23 @@ def test_signup_signs_in_and_returns_only_public_fields(http) -> None:
     assert client.get("/api/auth/me").json() == body
 
 
+def test_https_through_a_proxy_gets_a_secure_cookie(http) -> None:
+    # Hosts such as Railway terminate TLS and forward the request with X-Forwarded-Proto: https.
+    # The stack is configured for plain HTTP (SESSION_COOKIE_SECURE=false), yet the cookie must
+    # be Secure, so a local setting cannot weaken a public HTTPS deployment.
+    response = http().post(
+        "/api/auth/signup",
+        json={"email": unique_email("https"), "password": "integration passphrase"},
+        headers={"X-Forwarded-Proto": "https"},
+    )
+
+    assert response.status_code == 201
+    attributes = [part.strip().lower() for part in response.headers["set-cookie"].split(";")]
+    assert "secure" in attributes
+    assert "httponly" in attributes
+    assert "samesite=lax" in attributes
+
+
 def test_duplicate_email_is_rejected(alice: User, http) -> None:
     response = http().post(
         "/api/auth/signup", json={"email": alice.email.upper(), "password": "another passphrase"}
