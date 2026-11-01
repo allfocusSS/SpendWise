@@ -59,6 +59,175 @@
         }
       }
     },
+    "/api/auth/signup": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Signup",
+        "description": "Create an account (with its own default categories) and sign in.",
+        "operationId": "signup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ]
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Login",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ]
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Logout",
+        "description": "End this session. Safe to call when not signed in.",
+        "operationId": "logout",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ]
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Me",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ]
+      }
+    },
     "/api/categories": {
       "get": {
         "tags": [
@@ -66,6 +235,11 @@
         ],
         "summary": "List Categories",
         "operationId": "list_categories",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "type",
@@ -99,6 +273,16 @@
               }
             }
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -117,6 +301,11 @@
         ],
         "summary": "Create Category",
         "operationId": "create_category",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -137,6 +326,16 @@
                 }
               }
             }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "409": {
             "content": {
@@ -168,6 +367,11 @@
         ],
         "summary": "Get Category",
         "operationId": "get_category",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "category_id",
@@ -189,6 +393,16 @@
                 }
               }
             }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "404": {
             "content": {
@@ -218,6 +432,11 @@
         ],
         "summary": "Update Category",
         "operationId": "update_category",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "category_id",
@@ -249,6 +468,16 @@
                 }
               }
             }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "404": {
             "content": {
@@ -288,6 +517,11 @@
         ],
         "summary": "Delete Category",
         "operationId": "delete_category",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "category_id",
@@ -302,6 +536,16 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "404": {
             "content": {
@@ -343,6 +587,11 @@
         ],
         "summary": "List Transactions",
         "operationId": "list_transactions",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "date_from",
@@ -445,6 +694,16 @@
               }
             }
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -463,6 +722,11 @@
         ],
         "summary": "Create Transaction",
         "operationId": "create_transaction",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -484,6 +748,16 @@
               }
             }
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -504,6 +778,11 @@
         ],
         "summary": "Get Transaction",
         "operationId": "get_transaction",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "transaction_id",
@@ -525,6 +804,16 @@
                 }
               }
             }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "404": {
             "content": {
@@ -554,6 +843,11 @@
         ],
         "summary": "Update Transaction",
         "operationId": "update_transaction",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "transaction_id",
@@ -586,6 +880,16 @@
               }
             }
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -614,6 +918,11 @@
         ],
         "summary": "Delete Transaction",
         "operationId": "delete_transaction",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "transaction_id",
@@ -628,6 +937,16 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "404": {
             "content": {
@@ -660,6 +979,11 @@
         "summary": "Get Summary",
         "description": "Total income, expenses and balance. Without dates this is the all-time balance.",
         "operationId": "get_summary",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "date_from",
@@ -707,6 +1031,16 @@
               }
             }
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -727,6 +1061,11 @@
         ],
         "summary": "Get Category Breakdown",
         "operationId": "get_category_breakdown",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "type",
@@ -783,6 +1122,16 @@
               }
             }
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -803,6 +1152,11 @@
         ],
         "summary": "Get Monthly Trend",
         "operationId": "get_monthly_trend",
+        "security": [
+          {
+            "APIKeyCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "months",
@@ -846,6 +1200,16 @@
                 }
               }
             }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "422": {
             "description": "Validation Error",
@@ -1094,6 +1458,31 @@
         ],
         "title": "HealthResponse"
       },
+      "LoginRequest": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "maxLength": 254,
+            "minLength": 1,
+            "title": "Email"
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "format": "password",
+            "title": "Password"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "description": "No format or policy checks: a wrong email or password is simply \"invalid\" (401)."
+      },
       "MonthlyTrend": {
         "properties": {
           "months": {
@@ -1140,6 +1529,30 @@
           "net_cents"
         ],
         "title": "MonthlyTrendItem"
+      },
+      "SignupRequest": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "maxLength": 254,
+            "format": "email",
+            "title": "Email"
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 12,
+            "format": "password",
+            "title": "Password"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "SignupRequest"
       },
       "Summary": {
         "properties": {
@@ -1391,6 +1804,31 @@
         "title": "TransactionUpdate",
         "description": "PUT replaces the whole transaction, so it takes the same fields as create."
       },
+      "UserRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "created_at"
+        ],
+        "title": "UserRead",
+        "description": "The signed-in user. Never includes the password hash."
+      },
       "ValidationError": {
         "properties": {
           "loc": {
@@ -1430,6 +1868,14 @@
           "type"
         ],
         "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "APIKeyCookie": {
+        "type": "apiKey",
+        "description": "HttpOnly session cookie set by POST /api/auth/signup and /api/auth/login.",
+        "in": "cookie",
+        "name": "spendwise_session"
       }
     }
   }

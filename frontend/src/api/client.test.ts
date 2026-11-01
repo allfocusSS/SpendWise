@@ -52,6 +52,7 @@ describe('toApiError', () => {
   })
 
   it.each([
+    [401, null, 'Please log in to continue.'],
     [404, null, 'Not found.'],
     [500, 'Internal Server Error', 'The server had a problem. Please try again.'],
     [418, { detail: '' }, 'Request failed (HTTP 418).'],
@@ -83,6 +84,7 @@ describe('request', () => {
     expect(result).toEqual({ id: 1 })
     expect(fetchMock).toHaveBeenCalledWith('/api/categories', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: 'Pets', type: 'expense' }),
     })
@@ -117,5 +119,66 @@ describe('request', () => {
     await api.listTransactions({ type: 'income', limit: 20, offset: 0 })
 
     expect(fetchMock.mock.calls[0][0]).toBe('/api/transactions?type=income&limit=20&offset=0')
+  })
+})
+
+describe('auth', () => {
+  const alice = { id: 1, email: 'alice@example.com', created_at: '2026-11-01T00:00:00Z' }
+
+  it('sends the session cookie with every request and never handles a token', async () => {
+    const fetchMock = mockFetch(200, [])
+
+    await api.listCategories()
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.credentials).toBe('same-origin')
+    expect(init.headers).toBeUndefined() // no Authorization header: the cookie is HttpOnly
+  })
+
+  it('returns the current user', async () => {
+    const fetchMock = mockFetch(200, alice)
+
+    await expect(api.getCurrentUser()).resolves.toEqual(alice)
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/auth/me')
+  })
+
+  it('returns null instead of throwing when signed out', async () => {
+    mockFetch(401, { detail: 'Not authenticated' })
+    await expect(api.getCurrentUser()).resolves.toBeNull()
+  })
+
+  it('still throws for other failures while checking the session', async () => {
+    mockFetch(500)
+    await expect(api.getCurrentUser()).rejects.toMatchObject({ status: 500 })
+  })
+
+  it.each([
+    ['signup', () => api.signup({ email: 'a@example.com', password: 'p'.repeat(12) }), '/api/auth/signup'],
+    ['login', () => api.login({ email: 'a@example.com', password: 'p'.repeat(12) }), '/api/auth/login'],
+  ])('%s posts the credentials as JSON', async (_, call, url) => {
+    const fetchMock = mockFetch(200, alice)
+
+    await expect(call()).resolves.toEqual(alice)
+    const [calledUrl, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(calledUrl).toBe(url)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ email: 'a@example.com', password: 'p'.repeat(12) })
+  })
+
+  it('logs out with a POST', async () => {
+    const fetchMock = mockFetch(204)
+
+    await expect(api.logout()).resolves.toBeUndefined()
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/auth/logout')
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe('POST')
+  })
+
+  it('shows the generic message for a failed login', async () => {
+    mockFetch(401, { detail: 'Invalid email or password' })
+
+    await expect(api.login({ email: 'a@example.com', password: 'wrong' })).rejects.toMatchObject({
+      status: 401,
+      message: 'Invalid email or password',
+    })
   })
 })

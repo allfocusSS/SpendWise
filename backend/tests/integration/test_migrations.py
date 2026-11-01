@@ -1,13 +1,14 @@
 """Alembic migrations must build exactly the schema the models describe, on every database."""
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import Engine, create_engine, inspect, text
 
 from alembic import command
 from app.core.config import get_settings, normalize_database_url
@@ -34,25 +35,102 @@ def db_url(request: pytest.FixtureRequest, tmp_path: Path) -> str:
     return TEST_DATABASE_URL
 
 
-def test_upgrade_matches_models_and_downgrade_cleans_up(db_url: str) -> None:
-    config = make_config(db_url)
+@pytest.fixture
+def engine(db_url: str) -> Iterator[Engine]:
     engine = create_engine(db_url)
     assert inspect(engine).get_table_names() == [], "migrations need an empty database"
+    yield engine
+    # Leave a shared PostgreSQL test database empty for the next test.
+    with engine.begin() as connection:
+        for table in ("transactions", "categories", "sessions", "users", "alembic_version"):
+            connection.execute(text(f"DROP TABLE IF EXISTS {table}"))
+    engine.dispose()
 
-    try:
+
+def test_upgrade_matches_models_and_downgrade_cleans_up(db_url: str, engine: Engine) -> None:
+    config = make_config(db_url)
+
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        diff = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+    assert diff == [], f"Models and migrations are out of sync: {diff}"
+
+    command.downgrade(config, "base")
+    assert set(inspect(engine).get_table_names()) == {"alembic_version"}
+
+
+# --- 0002: data created before accounts existed -------------------------------------------------
+
+NOW = "2026-10-01 00:00:00"
+
+
+def add_0001_category(engine: Engine, name: str, is_default: bool) -> int:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO categories (name, type, color, is_default, created_at, updated_at) "
+                "VALUES (:name, 'expense', '#000000', :is_default, :now, :now)"
+            ),
+            {"name": name, "is_default": is_default, "now": NOW},
+        )
+        return connection.execute(
+            text("SELECT id FROM categories WHERE name = :name"), {"name": name}
+        ).scalar_one()
+
+
+def add_0001_transaction(engine: Engine, category_id: int) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO transactions (amount_cents, type, category_id, description, "
+                "occurred_on, source, created_at, updated_at) VALUES "
+                "(100, 'expense', :category_id, 'old', '2026-10-01', 'manual', :now, :now)"
+            ),
+            {"category_id": category_id, "now": NOW},
+        )
+
+
+def version(engine: Engine) -> str:
+    with engine.connect() as connection:
+        return connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+
+
+def count(engine: Engine, table: str) -> int:
+    with engine.connect() as connection:
+        return connection.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one()
+
+
+@pytest.mark.parametrize("legacy", ["transaction", "custom category"])
+def test_upgrade_refuses_data_without_an_owner(db_url: str, engine: Engine, legacy: str) -> None:
+    config = make_config(db_url)
+    command.upgrade(config, "0001")
+    groceries = add_0001_category(engine, "Groceries", is_default=True)
+    if legacy == "transaction":
+        add_0001_transaction(engine, groceries)
+    else:
+        add_0001_category(engine, "Pets", is_default=False)
+
+    with pytest.raises(RuntimeError, match="cannot be assigned to a user automatically"):
         command.upgrade(config, "head")
-        with engine.connect() as connection:
-            diff = compare_metadata(MigrationContext.configure(connection), Base.metadata)
-        assert diff == [], f"Models and migrations are out of sync: {diff}"
 
-        command.downgrade(config, "base")
-        assert set(inspect(engine).get_table_names()) == {"alembic_version"}
-    finally:
-        # Leave a shared PostgreSQL test database empty for the next test.
-        with engine.begin() as connection:
-            for table in ("transactions", "categories", "alembic_version"):
-                connection.execute(text(f"DROP TABLE IF EXISTS {table}"))
-        engine.dispose()
+    # Nothing was changed or deleted.
+    assert version(engine) == "0001"
+    assert "users" not in inspect(engine).get_table_names()
+    assert count(engine, "categories") == (1 if legacy == "transaction" else 2)
+    assert count(engine, "transactions") == (1 if legacy == "transaction" else 0)
+
+
+def test_upgrade_replaces_global_defaults_with_per_user_ones(db_url: str, engine: Engine) -> None:
+    config = make_config(db_url)
+    command.upgrade(config, "0001")
+    for name in ("Groceries", "Transport"):
+        add_0001_category(engine, name, is_default=True)
+
+    command.upgrade(config, "head")
+
+    assert version(engine) == "0002"
+    assert count(engine, "categories") == 0  # each new account gets its own defaults
+    assert {"users", "sessions"} <= set(inspect(engine).get_table_names())
 
 
 def test_database_url_from_settings_may_contain_percent(

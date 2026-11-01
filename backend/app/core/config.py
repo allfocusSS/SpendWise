@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # where the Vite dev server serves the frontend.
     frontend_dist: Path | None = None
 
+    # Sign-in sessions (HttpOnly cookie). SESSION_COOKIE_SECURE unset means "Secure in production
+    # only": browsers then send the cookie over HTTPS only. Set it to false only for a production
+    # build served over plain HTTP on localhost (the Docker Compose stack does this).
+    session_cookie_secure: bool | None = None
+    session_ttl_days: int = Field(default=14, ge=1, le=90)
+
     # AI: the app must work without a real key, so "fake" is the default.
     # An unknown AI_PROVIDER value fails at startup with a message listing the allowed values.
     ai_provider: Literal["fake", "anthropic"] = "fake"
@@ -55,16 +61,22 @@ class Settings(BaseSettings):
         # Accept "Fake", " FAKE " etc.; the Literal check above still rejects unknown names.
         return value.strip().lower() if isinstance(value, str) else value
 
-    @field_validator("anthropic_api_key", "frontend_dist", mode="before")
+    @field_validator("anthropic_api_key", "frontend_dist", "session_cookie_secure", mode="before")
     @classmethod
     def _blank_is_none(cls, value: object) -> object:
-        # ANTHROPIC_API_KEY= (empty, as in .env.example) means "not set"; same for FRONTEND_DIST.
+        # ANTHROPIC_API_KEY= (empty, as in .env.example) means "not set"; same for the others.
         return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("database_url", mode="before")
     @classmethod
     def _normalise_database_url(cls, value: object) -> object:
         return normalize_database_url(value) if isinstance(value, str) else value
+
+    @property
+    def cookie_secure(self) -> bool:
+        if self.session_cookie_secure is not None:
+            return self.session_cookie_secure
+        return self.environment == "production"
 
     @model_validator(mode="after")
     def _production_uses_postgresql(self) -> Self:

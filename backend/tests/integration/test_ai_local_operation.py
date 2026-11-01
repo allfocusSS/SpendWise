@@ -56,7 +56,7 @@ def test_app_starts_and_serves_data_when_ai_is_misconfigured(
 
     app = create_app()
     app.dependency_overrides[get_db] = client.app.dependency_overrides[get_db]
-    misconfigured = TestClient(app)
+    misconfigured = TestClient(app, cookies=client.cookies)  # same signed-in user
 
     # Non-AI features are unaffected...
     assert misconfigured.get("/api/health").status_code == 200

@@ -3,5 +3,14 @@
 from app.models.base import Base, TransactionSource, TransactionType
 from app.models.category import Category
 from app.models.transaction import Transaction
+from app.models.user import User, UserSession
 
-__all__ = ["Base", "Category", "Transaction", "TransactionSource", "TransactionType"]
+__all__ = [
+    "Base",
+    "Category",
+    "Transaction",
+    "TransactionSource",
+    "TransactionType",
+    "User",
+    "UserSession",
+]

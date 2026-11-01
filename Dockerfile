@@ -8,7 +8,8 @@
 #   docker run --rm -p 127.0.0.1:8000:8000 \
 #     -e DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/spendwise spendwise
 #
-# There is no authentication yet: do not expose this container publicly.
+# The session cookie is Secure (HTTPS only) in production; for plain HTTP on localhost add
+# -e SESSION_COOKIE_SECURE=false. Not deployed yet: see README, "Before deploying".
 
 # ---- 1. Frontend build (Node) ----
 FROM node:24-slim AS frontend

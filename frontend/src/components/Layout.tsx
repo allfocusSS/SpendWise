@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 import { NavLink, Outlet } from 'react-router'
 
 import type { Transaction, TransactionType } from '../api/client'
+import { useCurrentUser, useLogout } from '../api/queries'
 import { TransactionDialogContext, type OpenTransactionDialog } from '../lib/transactionDialog'
 import { AnalyticsIcon, DashboardIcon, PlusIcon, TagIcon, TransactionsIcon } from './icons'
 import { TransactionDialog } from './TransactionDialog'
@@ -14,14 +15,46 @@ const NAV = [
   { to: '/analytics', label: 'Analytics', icon: AnalyticsIcon },
 ]
 
-function Brand() {
+/** The ₸ mark and wordmark (also used on the sign-in pages). */
+export function BrandMark() {
   return (
-    <NavLink to="/" aria-label="SpendWise home" className="flex shrink-0 items-center gap-2.5 rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent">
+    <span className="flex shrink-0 items-center gap-2.5">
       <span className="grid size-8 place-items-center rounded-md bg-accent text-[15px] font-semibold text-on-accent" aria-hidden="true">
         ₸
       </span>
       <span className="text-base font-semibold tracking-[-0.02em] text-ink">SpendWise</span>
+    </span>
+  )
+}
+
+function Brand() {
+  return (
+    <NavLink to="/" aria-label="SpendWise home" className="flex shrink-0 rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent">
+      <BrandMark />
     </NavLink>
+  )
+}
+
+/** Signed-in email (wide screens) and the log-out action. */
+function Account() {
+  const user = useCurrentUser().data
+  const logout = useLogout()
+  return (
+    <div className="flex items-center gap-3">
+      {user && (
+        <span className="hidden max-w-56 truncate text-xs text-ink-subtle xl:inline" title={user.email}>
+          {user.email}
+        </span>
+      )}
+      <Button variant="ghost" size="sm" onClick={() => logout.mutate()} disabled={logout.isPending}>
+        {logout.isPending ? 'Logging out…' : 'Log out'}
+      </Button>
+      {logout.isError && (
+        <span role="alert" className="text-xs text-danger">
+          Couldn’t log out. Try again.
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -109,10 +142,8 @@ export function Layout() {
               <Brand />
               <TopNav />
             </div>
-            <div className="flex items-center gap-5">
-              <span className="hidden text-xs text-ink-subtle xl:inline" title="No authentication: do not expose this app publicly.">
-                Local build · no authentication
-              </span>
+            <div className="flex items-center gap-3 sm:gap-5">
+              <Account />
               <Button onClick={() => openTransaction()} className="max-sm:size-10 max-sm:p-0" aria-label="Add transaction">
                 <PlusIcon strokeWidth={2.2} className="size-4" />
                 <span className="max-sm:sr-only">Add transaction</span>
@@ -125,12 +156,9 @@ export function Layout() {
           <Outlet />
         </main>
 
-        <footer className="mx-auto hidden max-w-[1440px] px-8 pb-8 text-xs text-ink-subtle lg:block">
-          Local MVP without authentication. Do not expose this app publicly. Amounts are in Kazakhstani tenge (₸).
+        <footer className="mx-auto max-w-[1440px] px-4 pb-24 text-center text-xs text-ink-subtle lg:px-8 lg:pb-8 lg:text-left">
+          Amounts are in Kazakhstani tenge (₸).
         </footer>
-        <p className="px-4 pb-24 text-center text-xs text-ink-subtle lg:hidden">
-          Local MVP without authentication. Do not expose publicly.
-        </p>
 
         <BottomTabs />
 
