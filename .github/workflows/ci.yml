@@ -1,29 +1,43 @@
 name: CI
 
+# The complete test suite for every pull request to main and every push to main:
+# backend (SQLite and PostgreSQL), frontend, the Docker Compose integration suite and the
+# Playwright end-to-end suite. No secrets are used or needed; nothing is deployed.
+
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 
+# Read-only token. Uploading artifacts and using the cache do not need extra permissions.
 permissions:
   contents: read
 
+# A new commit on a pull request cancels that pull request's older run. Runs on main are keyed
+# by commit, so they never cancel each other and every main commit gets a full result.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   backend:
     name: Backend (lint + test)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+          cache-python: true
       - name: Install dependencies
         run: uv sync --locked
       - name: Lint
@@ -38,6 +52,7 @@ jobs:
   backend-postgres:
     name: Backend (PostgreSQL)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: backend
@@ -59,10 +74,14 @@ jobs:
     env:
       TEST_DATABASE_URL: postgresql+psycopg://spendwise:ci-only-password@localhost:5432/spendwise_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+          cache-python: true
       - name: Install dependencies
         run: uv sync --locked
       - name: Test on PostgreSQL
@@ -71,12 +90,15 @@ jobs:
   frontend:
     name: Frontend (lint + types + test + build)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -89,7 +111,115 @@ jobs:
         run: |
           npm run generate:api
           git diff --exit-code src/api/schema.d.ts
+      - name: Typecheck (app and end-to-end tests)
+        run: npm run typecheck
       - name: Unit tests
         run: npm test
-      - name: Build (includes typecheck)
+      - name: Build
         run: npm run build
+
+  integration:
+    name: Integration (Docker Compose + PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The tests write the run's container logs here (including containers replaced by the
+      # restart test); uploaded when the job fails.
+      SPENDWISE_IT_LOG_FILE: ${{ github.workspace }}/integration-compose-logs.txt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+          cache-python: true
+      - name: Docker and Compose versions
+        run: |
+          docker --version
+          docker compose version
+      - name: Integration tests (builds the image, real Compose stack with PostgreSQL)
+        run: make integration
+      - name: Upload Compose logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: integration-compose-logs
+          path: integration-compose-logs.txt
+          retention-days: 14
+          if-no-files-found: ignore
+      # The tests remove the stack themselves; this covers interrupted or cancelled runs.
+      - name: Remove the test stack and its volume
+        if: always()
+        working-directory: backend
+        run: uv run python -m integration.stack down
+
+  e2e:
+    name: End-to-end (Playwright, Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+          cache-python: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      # Only Chromium and the system libraries it needs. Not cached: Playwright recommends a
+      # fresh install, and restoring the cache takes about as long as downloading it.
+      - name: Install Playwright Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: End-to-end tests (builds the image, real Compose stack with PostgreSQL)
+        run: make e2e
+      # Failure artifacts only: the HTML report plus, per failed test, a trace, screenshot,
+      # browser log and page snapshot, and the run's container logs (compose-logs.txt).
+      - name: Upload Playwright report and failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-results
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 14
+          if-no-files-found: ignore
+      # Playwright's teardown normally removes the stack; this covers interrupted runs.
+      - name: Remove the test stack and its volume
+        if: always()
+        working-directory: backend
+        env:
+          SPENDWISE_IT_PROJECT: spendwise-e2e
+          SPENDWISE_IT_PORT: "18100"
+          SPENDWISE_IT_IMAGE: spendwise:e2e
+        run: uv run python -m integration.stack down
+
+  # One stable check for branch protection: it fails unless every job above succeeded.
+  all-checks:
+    name: All checks passed
+    if: always()
+    needs: [backend, backend-postgres, frontend, integration, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Job results
+        run: |
+          echo "backend:          ${{ needs.backend.result }}"
+          echo "backend-postgres: ${{ needs.backend-postgres.result }}"
+          echo "frontend:         ${{ needs.frontend.result }}"
+          echo "integration:      ${{ needs.integration.result }}"
+          echo "e2e:              ${{ needs.e2e.result }}"
+      - name: Fail unless every job succeeded
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: exit 1

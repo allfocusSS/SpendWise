@@ -24,6 +24,7 @@ Settings (all optional), read from the environment of the test run:
   SPENDWISE_IT_TIMEOUT   seconds to wait for the services to become healthy after they start
                          (default: 600; building the image is not counted)
   SPENDWISE_IT_KEEP=1    leave the stack and its volume running afterwards, for debugging
+  SPENDWISE_IT_LOG_FILE  if set, the integration tests write the run's container logs there
 """
 
 import contextlib
@@ -84,6 +85,8 @@ class Stack:
     db_password: str = field(default_factory=lambda: secrets.token_hex(16))
     # Filled by record_startup() right after the first `up`.
     db_first_healthy: datetime | None = None
+    # Logs of containers that were already removed (a restart replaces them), oldest first.
+    previous_logs: list[str] = field(default_factory=list)
     app_started: datetime | None = None
 
     @classmethod
@@ -178,6 +181,8 @@ class Stack:
         self.app_started = parse_docker_time(self.inspect("app")["State"]["StartedAt"])
 
     def down(self, volumes: bool) -> None:
+        if self.services():  # keep what these containers logged before they are removed
+            self.previous_logs.append(self.logs(tail=1000, include_previous=False))
         self.compose("down", "--remove-orphans", *(["--volumes"] if volumes else []))
 
     def services(self) -> dict[str, dict]:
@@ -215,11 +220,15 @@ class Stack:
         )
         return result.stdout.split()
 
-    def logs(self, tail: int = 200) -> str:
+    def logs(self, tail: int = 200, include_previous: bool = True) -> str:
+        """Recent container logs; by default also those of containers removed by a restart."""
         try:
-            return self.compose("logs", "--no-color", "--tail", str(tail), timeout=60).stdout
+            current = self.compose("logs", "--no-color", "--tail", str(tail), timeout=60).stdout
         except StackError as error:
-            return f"(could not read logs: {error})"
+            current = f"(could not read logs: {error})"
+        if not include_previous or not self.previous_logs:
+            return current
+        return "\n--- (containers restarted) ---\n".join([*self.previous_logs, current])
 
 
 def main(argv: list[str] | None = None) -> int:

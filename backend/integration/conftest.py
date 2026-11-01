@@ -9,9 +9,11 @@ integration/stack.py for the settings and how it is kept apart from your local s
 """
 
 import contextlib
+import os
 import secrets
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 import pytest
@@ -33,6 +35,16 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     items.sort(key=lambda item: item.get_closest_marker(RESTARTS_STACK) is not None)
 
 
+LOG_LINES = 1000  # per container; the full suite writes a few hundred access-log lines
+
+
+def show(request: pytest.FixtureRequest, text: str) -> None:
+    """Print past pytest's output capture (prints from session teardown are otherwise lost)."""
+    capture = request.config.pluginmanager.get_plugin("capturemanager")
+    with capture.global_and_fixture_disabled():
+        print(text)
+
+
 @pytest.fixture(scope="session")
 def stack(request: pytest.FixtureRequest) -> Iterator[Stack]:
     stack = Stack.from_env()
@@ -52,10 +64,15 @@ def stack(request: pytest.FixtureRequest) -> Iterator[Stack]:
 
     yield stack
 
-    if request.session.testsfailed:
-        print(f"\n--- docker compose logs ({stack.project}) ---\n{stack.logs()}")
+    log_file = os.environ.get("SPENDWISE_IT_LOG_FILE")
+    if request.session.testsfailed or log_file:
+        logs = stack.logs(tail=LOG_LINES)
+        if log_file:  # e.g. uploaded by CI when the job fails
+            Path(log_file).write_text(logs)
+        if request.session.testsfailed:
+            show(request, f"\n--- docker compose logs ({stack.project}) ---\n{logs}")
     if stack.keep:
-        print(f"\nSPENDWISE_IT_KEEP=1: stack '{stack.project}' left running at {stack.base_url}")
+        show(request, f"SPENDWISE_IT_KEEP=1: stack '{stack.project}' left at {stack.base_url}")
     else:
         stack.down(volumes=True)
 
