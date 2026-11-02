@@ -9,9 +9,16 @@ AI-powered personal finance manager (MVP). Single currency: KZT (₸).
 Each person signs up with an email and password and sees only their own transactions, categories
 and analytics (see [Accounts and security](#accounts-and-security)).
 
-> ⚠️ Ready for a first deployment on Render (see [Deploy to Render](#deploy-to-render)) or on
-> Railway from `compose.yaml` (see [Deploy to Railway](#deploy-to-railway)), but not deployed
-> yet. Read [Before deploying](#before-deploying) first.
+> **Deployment status**
+>
+> - **Render: live and verified** at <https://spendwise-amyx.onrender.com/>
+>   (see [Deploy to Render](#deploy-to-render)).
+> - **AWS: infrastructure prepared, not deployed yet.** The CloudFormation templates are in
+>   `deploy/aws/` (see [Deploy to AWS](#deploy-to-aws-ec2--cloudformation)).
+> - **Railway: prepared, not deployed.** New-account signup was unavailable at deployment time
+>   (see [Deploy to Railway](#deploy-to-railway)).
+>
+> Read [Before deploying](#before-deploying) before any new deployment.
 
 ## Quick start (Docker Compose)
 
@@ -200,7 +207,7 @@ docker run --rm --network spendwise -p 127.0.0.1:8000:8000 \
 - AI settings come from environment variables (`-e AI_PROVIDER=...`); no `.env` file is copied
   into the image.
 
-> ⚠️ Not deployed yet; see [Before deploying](#before-deploying).
+> ⚠️ Before deploying the image anywhere new, see [Before deploying](#before-deploying).
 
 ## Deploy to Railway
 
@@ -426,6 +433,32 @@ persistence and a second user's isolation. For the persistence step on Render, u
 Deploy, then Deploy latest commit (or Restart service) on `spendwise`, then rerun that line.
 If the service was asleep, the first request takes about a minute.
 
+## Deploy to AWS (EC2 + CloudFormation)
+
+`deploy/aws/` describes a free-tier-sized AWS deployment in CloudFormation: **one EC2 instance
+running Docker Compose** (the app, PostgreSQL 18 and Caddy for HTTPS), with the database on a
+separate, encrypted EBS volume that survives replacing the instance or deleting the stack. There
+is no RDS, load balancer, NAT gateway, ECS or autoscaling. The instance uses `compose.yaml` plus
+`deploy/aws/compose.aws.yaml`, never `compose.override.yaml`.
+
+- `deploy/aws/budget.yaml`: a monthly AWS Budget with email alerts. Deploy it first.
+- `deploy/aws/spendwise-stack.yaml`:
+  - networking: a VPC with one public subnet;
+  - a security group that opens only 80 and 443;
+  - shell access through SSM Session Manager (no SSH);
+  - an instance setup script that installs Docker, builds the image from GitHub and starts the
+    stack.
+
+  Stack creation finishes only when the app is healthy.
+- No secrets in Git: the database password is generated on the instance, and the GitHub deploy
+  key lives in SSM Parameter Store.
+
+[deploy/aws/README.md](deploy/aws/README.md) has the architecture, the free-tier and cost
+details, the security notes and the exact commands. Check the templates locally (no AWS
+credentials needed) with
+`uvx cfn-lint deploy/aws/spendwise-stack.yaml deploy/aws/budget.yaml` and
+`cd backend && uv run pytest tests/unit/test_aws_templates.py`.
+
 ## Accounts and security
 
 **Sign-in flow.** `POST /api/auth/signup` (email + password) creates an account and signs in;
@@ -491,13 +524,14 @@ Downgrading below `0002` deletes all users, sessions, categories and transaction
 
 ### Before deploying
 
-Accounts and per-user isolation are in place, but this MVP has not been deployed. A public
-deployment (for example [on Render](#deploy-to-render) or [on Railway](#deploy-to-railway))
-also needs:
+Accounts and per-user isolation are in place, and SpendWise runs on Render. Any public
+deployment (for example [on AWS](#deploy-to-aws-ec2--cloudformation),
+[on Render](#deploy-to-render) or [on Railway](#deploy-to-railway)) also needs:
 
-- HTTPS in front of the app (Render and Railway provide it), with `SESSION_COOKIE_SECURE` unset;
+- HTTPS in front of the app (Render and Railway provide it; on AWS, Caddy does), with
+  `SESSION_COOKIE_SECURE` unset;
 - a real database password (not the local default) and backups (Render's free database has
-  none and expires after 30 days);
+  none and expires after 30 days; on AWS, take `pg_dump` backups yourself);
 - rate limiting on `/api/auth/login` and `/api/auth/signup` at the reverse proxy: the app does
   not limit login attempts itself.
 
