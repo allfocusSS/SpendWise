@@ -41,3 +41,4 @@ Dockerfile
 .dockerignore
 compose.yaml
 compose.override.yaml
+render.yaml
