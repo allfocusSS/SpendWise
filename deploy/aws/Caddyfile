@@ -1,0 +1,21 @@
+# Caddy in front of SpendWise on EC2 (deploy/aws/README.md): HTTPS with an automatic Let's
+# Encrypt certificate, HTTP redirected to HTTPS, every request proxied to the app container.
+# Caddy adds X-Forwarded-Proto, so the app sets Secure session cookies.
+
+{
+	# HTTP/1.1 and HTTP/2 only: the security group opens TCP 80 and 443, not UDP 443 (HTTP/3).
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$SPENDWISE_SITE_ADDRESS} {
+	tls {
+		issuer acme {
+			# "classic" for a domain name. For an IP address Let's Encrypt requires "shortlived"
+			# (certificates valid for about 6 days, which Caddy renews automatically).
+			profile {$SPENDWISE_ACME_PROFILE}
+		}
+	}
+	reverse_proxy app:8000
+}

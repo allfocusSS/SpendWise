@@ -42,3 +42,4 @@ Dockerfile
 compose.yaml
 compose.override.yaml
 render.yaml
+deploy

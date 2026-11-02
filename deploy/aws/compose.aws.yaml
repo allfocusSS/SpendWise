@@ -1,0 +1,41 @@
+# EC2 additions to compose.yaml (deploy/aws/README.md). The instance runs
+#
+#   docker compose -f compose.yaml -f deploy/aws/compose.aws.yaml \
+#     --env-file /srv/spendwise/secrets/spendwise.env --env-file /etc/spendwise/deploy.env ...
+#
+# so compose.override.yaml (the local development defaults) is never used there. Settings come
+# from those two files, which the instance writes at first boot; none of them live in Git.
+
+services:
+  app:
+    image: spendwise:aws
+    # Still not published: only Caddy reaches the app, so the forwarded headers it trusts
+    # (X-Forwarded-Proto: https) always come from Caddy.
+
+  caddy:
+    image: caddy:2.11
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      # A domain name, or the Elastic IP when there is none.
+      SPENDWISE_SITE_ADDRESS: ${SPENDWISE_SITE_ADDRESS:?set in /etc/spendwise/deploy.env}
+      SPENDWISE_ACME_PROFILE: ${SPENDWISE_ACME_PROFILE:-classic}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/aws/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and the ACME account, kept on the data volume so a restart or a new
+      # instance does not request them again.
+      - ${SPENDWISE_DATA_DIR:?set in /etc/spendwise/deploy.env}/caddy:/data
+    restart: unless-stopped
+
+volumes:
+  # The database on the EBS data volume (mounted at /srv/spendwise), not on the root volume.
+  pgdata:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${SPENDWISE_DATA_DIR:?set in /etc/spendwise/deploy.env}/postgres

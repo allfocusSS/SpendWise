@@ -1,0 +1,507 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  SpendWise on one EC2 instance: Docker Compose runs the app, PostgreSQL and Caddy (HTTPS);
+  the database lives on a separate, encrypted, retained EBS volume. Free-tier sized; no RDS,
+  load balancer, NAT gateway or autoscaling. See deploy/aws/README.md.
+
+# Deploy the budget stack (budget.yaml) first. Nothing here holds a secret: the database password
+# is generated on the instance at first boot and the GitHub deploy key stays in Parameter Store.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Instance }
+        Parameters: [ImageId, InstanceType, CpuCreditMode, AvailabilityZone, RootVolumeSize]
+      - Label: { default: Data }
+        Parameters: [DataVolumeSize, ExistingDataVolumeId]
+      - Label: { default: Application }
+        Parameters: [GitHubRepository, GitRef, DeployKeyParameterName, DomainName]
+
+Parameters:
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      Amazon Linux 2023 AMI ID for this region, matching the instance's architecture (x86_64 for
+      t2/t3, arm64 for t4g). Look it up with the command in deploy/aws/README.md. Pinned on
+      purpose: a new AMI replaces the instance, so it only changes when you pass a new ID.
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small, t4g.micro, t4g.small, t2.micro]
+    Description: Free-tier / free-plan eligible burstable types only (see README for which applies).
+  CpuCreditMode:
+    Type: String
+    Default: standard
+    AllowedValues: [standard, unlimited]
+    Description: >-
+      standard never bills for CPU bursts (the instance is throttled to its baseline instead).
+      unlimited can add charges if average CPU stays above baseline.
+  AvailabilityZone:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional. Empty means the region's first zone. The instance and data volume must share a
+      zone, so a reused data volume (ExistingDataVolumeId) needs the zone it was created in.
+  RootVolumeSize:
+    Type: Number
+    Default: 20
+    MinValue: 8
+    MaxValue: 20
+    Description: GiB, gp3, encrypted. OS, Docker images, build cache and swap.
+  DataVolumeSize:
+    Type: Number
+    Default: 8
+    MinValue: 1
+    MaxValue: 10
+    Description: GiB, gp3, encrypted. PostgreSQL data, TLS certificates, the generated password.
+  ExistingDataVolumeId:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^vol-[0-9a-f]+$
+    Description: >-
+      Optional. Attach this retained SpendWise data volume (from an earlier stack) instead of
+      creating a new one; the existing database and password are reused.
+  GitHubRepository:
+    Type: String
+    Default: allfocusSS/SpendWise
+    AllowedPattern: ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$
+    Description: GitHub owner/name the instance builds the image from.
+  GitRef:
+    Type: String
+    Default: main
+    AllowedPattern: ^[A-Za-z0-9._/-]+$
+    Description: Branch, tag or commit to deploy at first boot (spendwise-deploy takes another later).
+  DeployKeyParameterName:
+    Type: String
+    Default: /spendwise/github-deploy-key
+    AllowedPattern: ^$|^/[A-Za-z0-9_./-]+$
+    Description: >-
+      SecureString parameter holding a read-only GitHub deploy key (needed for a private repo).
+      Empty clones anonymously over HTTPS, for a public repository.
+  DomainName:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$
+    Description: >-
+      Optional. A name whose DNS A record points at the stack's Elastic IP. Empty serves HTTPS on
+      the Elastic IP itself (a Let's Encrypt IP address certificate).
+
+Conditions:
+  CreateDataVolume: !Equals [!Ref ExistingDataVolumeId, ""]
+  HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+  HasDeployKey: !Not [!Equals [!Ref DeployKeyParameterName, ""]]
+  HasAvailabilityZone: !Not [!Equals [!Ref AvailabilityZone, ""]]
+
+Resources:
+  # --- Network: one public subnet in its own VPC. No NAT gateway, no private subnets: the only
+  # instance is public, and the database is reachable only inside Docker on that instance.
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-vpc" }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-igw" }]
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.1.0/24
+      AvailabilityZone: !If
+        - HasAvailabilityZone
+        - !Ref AvailabilityZone
+        - !Select [0, !GetAZs ""]
+      # Internet access from first boot; the Elastic IP replaces this address once associated.
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-public" }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-public" }]
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # --- Security: HTTP and HTTPS in, nothing else. No SSH: shell access is SSM Session Manager.
+  # PostgreSQL (5432) and the app (8000) are never published on the instance.
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SpendWise web traffic (HTTP redirects to HTTPS)
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: "HTTP (ACME challenge, redirect)" }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS }
+      # Outbound HTTP(S) only: packages, GitHub (git over SSH uses ssh.github.com:443), container
+      # images, Let's Encrypt, SSM and CloudFormation. DNS and NTP to AWS are not filtered.
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: HTTP }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS }
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-web" }]
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Session Manager shell access instead of SSH (no key pair, no open port).
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies: !If
+        - HasDeployKey
+        - - PolicyName: read-github-deploy-key
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                # This one parameter only. The default aws/ssm key decrypts it for this account.
+                - Effect: Allow
+                  Action: ssm:GetParameter
+                  Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DeployKeyParameterName}
+        - !Ref AWS::NoValue
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # --- Data: PostgreSQL, the TLS certificates and the generated database password live here,
+  # not on the root volume, so they survive replacing the instance or deleting the stack.
+  # Retained on stack deletion (and on a failed first create): delete it by hand when done,
+  # since a retained volume keeps billing.
+
+  DataVolume:
+    Type: AWS::EC2::Volume
+    Condition: CreateDataVolume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !GetAtt PublicSubnet.AvailabilityZone
+      Size: !Ref DataVolumeSize
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-data" }
+        - { Key: spendwise:data, Value: "true" }
+
+  # --- Address: a stable public IP for the HTTPS certificate and any DNS record. Released when
+  # the stack is deleted.
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-ip" }]
+
+  # --- Instance
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          # IMDSv2 only, and a hop limit of 1 so containers cannot reach the instance's credentials.
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+
+  Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: [DefaultRoute, PublicSubnetRouteTableAssociation]
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      CreditSpecification:
+        CPUCredits: !Ref CpuCreditMode
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: [!Ref InstanceSecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref RootVolumeSize
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags: [{ Key: Name, Value: !Ref AWS::StackName }]
+      # Runs once, at first boot. Later deploys: `sudo spendwise-deploy` (README), not stack updates.
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            # SpendWise first boot, run once by cloud-init as root. Log: /var/log/spendwise-bootstrap.log
+            set -euo pipefail
+            exec > >(tee -a /var/log/spendwise-bootstrap.log) 2>&1
+
+            # Report the result to CloudFormation (the AppReady wait condition). cfn-signal needs no
+            # credentials: CloudFormation checks that the instance belongs to this stack.
+            signal() {
+              if [ -x /opt/aws/bin/cfn-signal ]; then
+                /opt/aws/bin/cfn-signal --exit-code "$1" --stack '${AWS::StackName}' \
+                  --resource AppReady --region '${AWS::Region}' || true
+              fi
+            }
+            on_exit() {
+              local rc=$?
+              if [ "$rc" -ne 0 ]; then signal "$rc"; fi
+            }
+            trap on_exit EXIT
+
+            retry() {
+              for attempt in 1 2 3 4 5; do
+                "$@" && return 0
+                echo "Attempt $attempt failed: $*"
+                sleep 10
+              done
+              return 1
+            }
+
+            echo "== Waiting for the Elastic IP ${ElasticIp}"
+            # CloudFormation associates it just after the instance starts. Waiting for it first keeps
+            # downloads from being cut off when the public address changes.
+            for _ in $(seq 1 60); do
+              token=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token \
+                -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' || true)
+              current=$(curl -fsS -H "X-aws-ec2-metadata-token: $token" \
+                http://169.254.169.254/latest/meta-data/public-ipv4 || true)
+              if [ "$current" = '${ElasticIp}' ]; then break; fi
+              sleep 5
+            done
+
+            echo "== Packages"
+            retry dnf install -y docker git xfsprogs openssl aws-cfn-bootstrap
+
+            echo "== Docker Compose and Buildx plugins (pinned, checksum-verified)"
+            COMPOSE_VERSION=v5.6.1
+            BUILDX_VERSION=v0.38.1
+            case "$(uname -m)" in
+              x86_64)
+                compose_arch=x86_64 buildx_arch=amd64
+                compose_sha=47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0
+                buildx_sha=e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4 ;;
+              aarch64)
+                compose_arch=aarch64 buildx_arch=arm64
+                compose_sha=42cfa75f51ad0ccf290bad37899e0038a8c10a0069e85233ecc1d53e3ff1347d
+                buildx_sha=3b83b3731916ba433feccaaa689fe5bcdc81c641d92c8e6c2ea865dfa141c97a ;;
+              *) echo "Unsupported architecture: $(uname -m)"; exit 1 ;;
+            esac
+            plugins=/usr/local/lib/docker/cli-plugins
+            mkdir -p "$plugins"
+            install_plugin() { # name url sha256
+              retry curl -fsSL -o "$plugins/$1" "$2"
+              echo "$3  $plugins/$1" | sha256sum -c -
+              chmod 755 "$plugins/$1"
+            }
+            install_plugin docker-compose \
+              "https://github.com/docker/compose/releases/download/${!COMPOSE_VERSION}/docker-compose-linux-$compose_arch" \
+              "$compose_sha"
+            install_plugin docker-buildx \
+              "https://github.com/docker/buildx/releases/download/${!BUILDX_VERSION}/buildx-${!BUILDX_VERSION}.linux-$buildx_arch" \
+              "$buildx_sha"
+
+            echo "== Swap (building the image needs more than 1 GiB of memory)"
+            if [ ! -f /swapfile ]; then
+              dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+              chmod 600 /swapfile
+              mkswap /swapfile
+              echo "/swapfile none swap defaults 0 0" >> /etc/fstab
+            fi
+            swapon /swapfile || echo "Swap not enabled; continuing"
+
+            echo "== Data volume ${DataVolumeId} at /srv/spendwise"
+            volume_id='${DataVolumeId}'
+            nvme_device="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${!volume_id//-/}"
+            device=""
+            for _ in $(seq 1 120); do # attached by CloudFormation shortly after boot
+              if [ -e "$nvme_device" ]; then device="$nvme_device"; break; fi
+              if [ -e /dev/xvdf ]; then device=/dev/xvdf; break; fi # Xen instances (t2)
+              sleep 5
+            done
+            if [ -z "$device" ]; then echo "The data volume was never attached"; exit 1; fi
+            # Format only a blank volume: a reused volume keeps its database.
+            if ! blkid "$device" > /dev/null; then
+              mkfs.xfs -L spendwise "$device" # XFS labels are at most 12 characters
+            fi
+            uuid=$(blkid -s UUID -o value "$device")
+            mkdir -p /srv/spendwise
+            if ! grep -q "$uuid" /etc/fstab; then
+              echo "UUID=$uuid /srv/spendwise xfs defaults,nofail 0 2" >> /etc/fstab
+            fi
+            systemctl daemon-reload
+            mountpoint -q /srv/spendwise || mount /srv/spendwise
+
+            echo "== Docker (only starts once the data volume is mounted)"
+            mkdir -p /etc/systemd/system/docker.service.d
+            cat > /etc/systemd/system/docker.service.d/spendwise-data.conf <<'UNIT'
+            [Unit]
+            RequiresMountsFor=/srv/spendwise
+            UNIT
+            systemctl daemon-reload
+            systemctl enable --now docker
+
+            echo "== Data directories and the database password"
+            install -d -m 700 /srv/spendwise/secrets
+            install -d /srv/spendwise/postgres /srv/spendwise/caddy
+            # Generated once and kept on the data volume with the database it belongs to. Hex is
+            # URL-safe, as DATABASE_URL requires. It is never printed or sent anywhere.
+            secrets=/srv/spendwise/secrets/spendwise.env
+            if [ ! -s "$secrets" ]; then
+              password=$(openssl rand -hex 32)
+              (umask 077; printf 'POSTGRES_PASSWORD=%s\n' "$password" > "$secrets")
+              unset password
+            fi
+            if ! grep -Eq '^POSTGRES_PASSWORD=[A-Za-z0-9._-]{16,}$' "$secrets"; then
+              echo "$secrets has no usable POSTGRES_PASSWORD"
+              exit 1
+            fi
+
+            echo "== Deployment settings"
+            install -d -m 755 /etc/spendwise
+            cat > /etc/spendwise/deploy.env <<'CONFIG'
+            GITHUB_REPOSITORY=${GitHubRepository}
+            GIT_REF=${GitRef}
+            DEPLOY_KEY_PARAMETER=${DeployKeyParameterName}
+            AWS_REGION=${AWS::Region}
+            SPENDWISE_SITE_ADDRESS=${SiteAddress}
+            SPENDWISE_ACME_PROFILE=${AcmeProfile}
+            SPENDWISE_DATA_DIR=/srv/spendwise
+            CONFIG
+            # GitHub's published SSH host keys (api.github.com/meta), for ssh.github.com on port 443.
+            cat > /etc/spendwise/github_known_hosts <<'KEYS'
+            [ssh.github.com]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+            [ssh.github.com]:443 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+            [ssh.github.com]:443 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+            KEYS
+
+            cat > /usr/local/bin/spendwise-deploy <<'DEPLOY'
+            #!/bin/bash
+            # Deploy a Git ref: fetch it, rebuild the app image, restart the Compose stack and wait
+            # until it is healthy. The database, its password and the certificates are kept.
+            #   sudo spendwise-deploy          # the ref in /etc/spendwise/deploy.env
+            #   sudo spendwise-deploy v1.2.0   # any branch, tag or commit
+            set -euo pipefail
+            # shellcheck source=/dev/null
+            set -a; . /etc/spendwise/deploy.env; set +a
+            ref="${!1:-$GIT_REF}"
+            src=/opt/spendwise/src
+
+            if [ -n "$DEPLOY_KEY_PARAMETER" ]; then
+              # Fetched for this run only; the key never stays on disk.
+              key=$(mktemp)
+              trap 'rm -f "$key"' EXIT
+              aws ssm get-parameter --region "$AWS_REGION" --name "$DEPLOY_KEY_PARAMETER" \
+                --with-decryption --query Parameter.Value --output text > "$key"
+              export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/spendwise/github_known_hosts"
+              url="ssh://git@ssh.github.com:443/$GITHUB_REPOSITORY.git"
+            else
+              url="https://github.com/$GITHUB_REPOSITORY.git"
+            fi
+
+            if [ ! -d "$src/.git" ]; then git init -q "$src"; fi
+            git -C "$src" remote remove origin 2> /dev/null || true
+            git -C "$src" remote add origin "$url"
+            git -C "$src" fetch -q --depth 1 origin "$ref"
+            git -C "$src" checkout -q --force --detach FETCH_HEAD
+            echo "Deploying $ref ($(git -C "$src" rev-parse --short HEAD))"
+
+            # compose.yaml plus the EC2 additions; compose.override.yaml (local defaults) is not used.
+            compose=(docker compose --project-directory "$src"
+              -f "$src/compose.yaml" -f "$src/deploy/aws/compose.aws.yaml"
+              --env-file /srv/spendwise/secrets/spendwise.env --env-file /etc/spendwise/deploy.env)
+            "${!compose[@]}" build app
+            if ! "${!compose[@]}" up -d --remove-orphans --wait --wait-timeout 600; then
+              "${!compose[@]}" ps
+              "${!compose[@]}" logs --tail 40
+              echo "SpendWise did not become healthy."
+              exit 1
+            fi
+            docker image prune -f > /dev/null
+            echo "SpendWise is up: https://$SPENDWISE_SITE_ADDRESS"
+            DEPLOY
+            chmod 755 /usr/local/bin/spendwise-deploy
+
+            echo "== First deploy"
+            /usr/local/bin/spendwise-deploy
+            signal 0
+            echo "== Done"
+          - DataVolumeId: !If [CreateDataVolume, !Ref DataVolume, !Ref ExistingDataVolumeId]
+            SiteAddress: !If [HasDomain, !Ref DomainName, !Ref ElasticIp]
+            AcmeProfile: !If [HasDomain, classic, shortlived]
+
+  DataVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref Instance
+      VolumeId: !If [CreateDataVolume, !Ref DataVolume, !Ref ExistingDataVolumeId]
+      Device: /dev/sdf
+
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      InstanceId: !Ref Instance
+
+  # Stack creation completes only once the first deploy is healthy (or fails when it is not).
+  # A wait condition rather than a CreationPolicy on the instance: the data volume can only be
+  # attached after the instance resource exists, and setup waits for that volume.
+  AppReady:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: [DataVolumeAttachment, ElasticIpAssociation]
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        # Building the image on a micro instance in standard CPU mode is slow (README).
+        Timeout: PT60M
+
+Outputs:
+  SiteUrl:
+    Description: SpendWise (HTTPS; the certificate is issued within a minute or two of startup)
+    Value: !If
+      - HasDomain
+      - !Sub https://${DomainName}
+      - !Sub https://${ElasticIp}
+  PublicIp:
+    Description: Elastic IP (point a domain's A record here)
+    Value: !Ref ElasticIp
+  InstanceId:
+    Value: !Ref Instance
+  DataVolumeId:
+    Description: Retained when the stack is deleted; pass as ExistingDataVolumeId to reuse it
+    Value: !If [CreateDataVolume, !Ref DataVolume, !Ref ExistingDataVolumeId]
+  SessionCommand:
+    Description: Shell on the instance (needs the Session Manager plugin for the AWS CLI)
+    Value: !Sub aws ssm start-session --region ${AWS::Region} --target ${Instance}
