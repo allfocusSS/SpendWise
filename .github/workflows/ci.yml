@@ -2,7 +2,11 @@ name: CI
 
 # The complete test suite for every pull request to main and every push to main:
 # backend (SQLite and PostgreSQL), frontend, the Docker Compose integration suite and the
-# Playwright end-to-end suite. No secrets are used or needed; nothing is deployed.
+# Playwright end-to-end suite. No secrets are used or needed.
+#
+# After every job passed on a push to main, deploy-aws deploys that exact commit to the AWS
+# instance with short-lived credentials from GitHub's OIDC token (deploy/aws/README.md,
+# "Automatic deploys"). Pull requests never deploy.
 
 on:
   pull_request:
@@ -12,6 +16,7 @@ on:
   workflow_dispatch:
 
 # Read-only token. Uploading artifacts and using the cache do not need extra permissions.
+# deploy-aws alone also gets id-token: write.
 permissions:
   contents: read
 
@@ -223,3 +228,130 @@ jobs:
       - name: Fail unless every job succeeded
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
         run: exit 1
+
+  # Continuous deployment to AWS: only for a push to main, only after "All checks passed"
+  # succeeded, and only in this repository. Skipped (not failed) until the repository variables
+  # exist, so this can be merged before the CloudFormation stack is updated.
+  deploy-aws:
+    name: Deploy to AWS
+    needs: [all-checks]
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      github.repository == 'allfocusSS/SpendWise' && vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    # The deploy builds the image on a micro instance (up to 50 minutes, the document's limit).
+    timeout-minutes: 65
+    permissions:
+      contents: read
+      id-token: write # the OIDC token that AWS exchanges for temporary credentials
+    # One deploy at a time and never cancelled half-way; a newer commit waits for it.
+    concurrency:
+      group: deploy-aws-production
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      INSTANCE_ID: ${{ vars.AWS_INSTANCE_ID }}
+      DEPLOY_DOCUMENT: ${{ vars.AWS_DEPLOY_DOCUMENT }}
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      # The commit this run tested, never "main": a later push cannot slip into this deploy.
+      COMMIT_SHA: ${{ github.sha }}
+    steps:
+      - name: Check the deployment settings
+        run: |
+          ok=true
+          check() { # name value pattern
+            if ! [[ $2 =~ $3 ]]; then echo "::error::$1 is missing or invalid (deploy/aws/README.md)"; ok=false; fi
+          }
+          check "Repository variable AWS_REGION" "$AWS_REGION" '^[a-z]{2}(-[a-z]+)+-[0-9]$'
+          check "Repository variable AWS_INSTANCE_ID" "$INSTANCE_ID" '^i-[0-9a-f]{8,17}$'
+          check "Repository variable AWS_DEPLOY_DOCUMENT" "$DEPLOY_DOCUMENT" '^[A-Za-z0-9_.-]{3,128}$'
+          check "Repository variable PRODUCTION_URL" "$PRODUCTION_URL" '^https://[A-Za-z0-9.-]+$'
+          check "The commit SHA" "$COMMIT_SHA" '^[0-9a-f]{40}$'
+          $ok
+
+      # Runs on main are not cancelled by newer ones, so an older commit can finish CI after a
+      # newer one. Deploying it would roll production back; the newer run deploys instead.
+      - name: Skip if main has moved on
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [ "$head" = "$COMMIT_SHA" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::main is now at $head; that run deploys instead of $COMMIT_SHA."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get temporary AWS credentials (OIDC)
+        if: steps.latest.outputs.deploy == 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          audience: sts.amazonaws.com
+          role-session-name: spendwise-deploy-${{ github.run_id }}
+          role-duration-seconds: 3600
+
+      # The SSM document runs `spendwise-deploy <commit SHA>` as root on the instance: fetch,
+      # build, `docker compose up --wait`. It fails unless the stack becomes healthy.
+      - name: Deploy the commit through SSM Run Command
+        if: steps.latest.outputs.deploy == 'true'
+        run: |
+          command_id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "$DEPLOY_DOCUMENT" \
+            --parameters "CommitSha=$COMMIT_SHA" \
+            --comment "GitHub Actions run $GITHUB_RUN_ID, ${COMMIT_SHA:0:12}" \
+            --timeout-seconds 600 \
+            --query Command.CommandId --output text)
+          echo "SSM command $command_id"
+
+          # Bounded polling: a little longer than the document's own 3000-second limit.
+          deadline=$((SECONDS + 3200))
+          while :; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::No result from SSM command $command_id in time"
+              exit 1
+            fi
+            sleep 15
+            if ! invocation=$(aws ssm get-command-invocation --command-id "$command_id" \
+                --instance-id "$INSTANCE_ID" --output json 2>&1); then
+              # Right after SendCommand the invocation may not exist yet.
+              if grep -q InvocationDoesNotExist <<< "$invocation"; then continue; fi
+              echo "$invocation"
+              exit 1
+            fi
+            status=$(jq -r .Status <<< "$invocation")
+            case "$status" in
+              Pending | InProgress | Delayed) echo "$status (${SECONDS}s)" ;;
+              *) break ;;
+            esac
+          done
+
+          echo "::group::Output of spendwise-deploy on the instance"
+          jq -r .StandardOutputContent <<< "$invocation"
+          jq -r .StandardErrorContent <<< "$invocation"
+          echo "::endgroup::"
+          if [ "$status" != Success ]; then
+            echo "::error::Deploy failed on the instance: $status (SSM command $command_id)"
+            exit 1
+          fi
+          if ! jq -r .StandardOutputContent <<< "$invocation" | grep -q "^Deploying $COMMIT_SHA "; then
+            echo "::error::The instance did not report deploying $COMMIT_SHA"
+            exit 1
+          fi
+
+      - name: Verify production health
+        if: steps.latest.outputs.deploy == 'true'
+        run: |
+          # Bounded retries: Caddy may still be starting after the containers were replaced.
+          for path in /api/health /api/health/ready; do
+            echo "GET $PRODUCTION_URL$path"
+            curl -fsS --max-time 10 --retry 12 --retry-delay 5 --retry-all-errors \
+              "$PRODUCTION_URL$path"
+            echo
+          done
+          curl -fsS --max-time 10 "$PRODUCTION_URL/" | grep -q '<div id="root">'
+          echo "Deployed $COMMIT_SHA to $PRODUCTION_URL" >> "$GITHUB_STEP_SUMMARY"

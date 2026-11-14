@@ -214,3 +214,150 @@ def test_database_lives_on_the_data_volume() -> None:
     options = compose["volumes"]["pgdata"]["driver_opts"]
     assert options["o"] == "bind"
     assert options["device"].startswith("${SPENDWISE_DATA_DIR:?")
+
+
+# --- Continuous deployment from GitHub Actions (Issue #11) ---
+
+# gh api repos/allfocusSS/SpendWise --jq '{repo_id: .id, owner_id: .owner.id}'. The repository
+# uses GitHub's immutable OIDC subject format (created after 15 July 2026), which embeds both IDs.
+EXPECTED_DEPLOY_SUBJECT = "repo:allfocusSS@189591398/SpendWise@1441102769:ref:refs/heads/main"
+
+
+def evaluate(stack: dict[str, Any], value: Any, names: dict[str, Any] | None = None) -> Any:
+    """Resolves the intrinsics the trust policy uses, with the parameters' defaults."""
+    names = names or {}
+    if isinstance(value, dict) and len(value) == 1:
+        ((key, arg),) = value.items()
+        if key == "Ref":
+            return names[arg] if arg in names else stack["Parameters"][arg]["Default"]
+        if key == "Fn::Select":
+            return evaluate(stack, arg[1], names)[arg[0]]
+        if key == "Fn::Split":
+            return evaluate(stack, arg[1], names).split(arg[0])
+        if key == "Fn::Sub":
+            template, variables = arg if isinstance(arg, list) else (arg, {})
+            values = {k: evaluate(stack, v, names) for k, v in variables.items()}
+            return re.sub(
+                r"\$\{([^}]+)\}",
+                lambda m: values.get(m.group(1)) or evaluate(stack, {"Ref": m.group(1)}, names),
+                template,
+            )
+    return value
+
+
+def deploy_role(stack: dict[str, Any]) -> dict[str, Any]:
+    return stack["Resources"]["GitHubDeployRole"]["Properties"]
+
+
+def deploy_statements(stack: dict[str, Any]) -> list[dict[str, Any]]:
+    (policy,) = deploy_role(stack)["Policies"]
+    return policy["PolicyDocument"]["Statement"]
+
+
+def test_github_oidc_provider_issues_tokens_for_sts_only(stack) -> None:
+    provider = stack["Resources"]["GitHubOidcProvider"]
+    assert provider["Type"] == "AWS::IAM::OIDCProvider"
+    assert provider["Properties"]["Url"] == "https://token.actions.githubusercontent.com"
+    assert provider["Properties"]["ClientIdList"] == ["sts.amazonaws.com"]
+    # An account holds one provider per URL, so an existing one can be passed in instead.
+    assert provider["Condition"] == "CreateGitHubOidcProvider"
+    assert stack["Parameters"]["ExistingGitHubOidcProviderArn"]["Default"] == ""
+
+
+def test_deploy_role_trusts_only_spendwise_main_through_oidc(stack) -> None:
+    (statement,) = deploy_role(stack)["AssumeRolePolicyDocument"]["Statement"]
+    assert statement["Effect"] == "Allow"
+    assert statement["Action"] == "sts:AssumeRoleWithWebIdentity"
+    assert set(statement["Principal"]) == {"Federated"}
+    federated = statement["Principal"]["Federated"]["Fn::If"]
+    assert federated == [
+        "CreateGitHubOidcProvider",
+        {"Ref": "GitHubOidcProvider"},
+        {"Ref": "ExistingGitHubOidcProviderArn"},
+    ]
+    # Exact matches only: no StringLike, so no wildcard can widen the trust.
+    assert set(statement["Condition"]) == {"StringEquals"}
+    conditions = statement["Condition"]["StringEquals"]
+    assert set(conditions) == {
+        "token.actions.githubusercontent.com:aud",
+        "token.actions.githubusercontent.com:sub",
+    }
+    assert conditions["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com"
+    subject = evaluate(stack, conditions["token.actions.githubusercontent.com:sub"])
+    assert subject == EXPECTED_DEPLOY_SUBJECT
+
+
+@pytest.mark.parametrize(
+    "parameter",
+    ["GitHubOwnerId", "GitHubRepositoryId", "GitHubDeployBranch", "GitHubRepository"],
+)
+def test_deploy_subject_changes_with_every_part_of_the_identity(stack, parameter) -> None:
+    (statement,) = deploy_role(stack)["AssumeRolePolicyDocument"]["Statement"]
+    sub = statement["Condition"]["StringEquals"]["token.actions.githubusercontent.com:sub"]
+    other = "someone/else" if parameter == "GitHubRepository" else "999"
+    assert evaluate(stack, sub, {parameter: other}) != EXPECTED_DEPLOY_SUBJECT
+
+
+def test_deploy_role_can_only_run_the_deploy_document_on_the_instance(stack) -> None:
+    role = deploy_role(stack)
+    assert "ManagedPolicyArns" not in role
+    statements = deploy_statements(stack)
+    assert all(s["Effect"] == "Allow" for s in statements)
+    assert {s["Action"] for s in statements} == {"ssm:SendCommand", "ssm:GetCommandInvocation"}
+
+    (send,) = [s for s in statements if s["Action"] == "ssm:SendCommand"]
+    assert [r["Fn::Sub"] for r in send["Resource"]] == [
+        "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}",
+        "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${DeployDocument}",
+    ]
+    # GetCommandInvocation has no resource-level permissions; it only reads results.
+    (read,) = [s for s in statements if s["Action"] == "ssm:GetCommandInvocation"]
+    assert read["Resource"] == "*"
+
+
+def test_no_role_gets_administrator_or_wildcard_permissions(stack) -> None:
+    text = (AWS_DIR / "spendwise-stack.yaml").read_text()
+    assert "AdministratorAccess" not in text
+    assert "PowerUserAccess" not in text
+    assert "document/AWS-" not in text  # no AWS-owned document such as AWS-RunShellScript
+    assert "iam:PassRole" not in text
+    for statement in deploy_statements(stack):
+        assert "*" not in statement["Action"]
+        assert not statement["Action"].startswith(("ec2:", "iam:", "ssm:StartSession"))
+
+
+def test_deploy_document_runs_only_spendwise_deploy_with_a_commit_sha(stack) -> None:
+    document = stack["Resources"]["DeployDocument"]["Properties"]
+    assert document["DocumentType"] == "Command"
+    assert document["TargetType"] == "/AWS::EC2::Instance"
+    content = document["Content"]
+    parameters = content["parameters"]
+    assert set(parameters) == {"CommitSha"}
+    assert parameters["CommitSha"]["allowedPattern"] == "^[0-9a-f]{40}$"
+    (step,) = content["mainSteps"]
+    assert step["action"] == "aws:runShellScript"
+    assert step["inputs"]["runCommand"] == ["/usr/local/bin/spendwise-deploy '{{ CommitSha }}'"]
+    assert "spendwise-deploy" in render_user_data(stack)
+
+
+def test_continuous_deployment_adds_nothing_that_costs_money(stack) -> None:
+    added = {"GitHubOidcProvider", "DeployDocument", "GitHubDeployRole"}
+    assert {stack["Resources"][name]["Type"] for name in added} == {
+        "AWS::IAM::OIDCProvider",
+        "AWS::SSM::Document",
+        "AWS::IAM::Role",
+    }
+
+
+def test_outputs_give_the_github_repository_variables(stack) -> None:
+    outputs = stack["Outputs"]
+    assert outputs["GitHubDeployRoleArn"]["Value"] == {"Fn::GetAtt": "GitHubDeployRole.Arn"}
+    assert outputs["DeployDocumentName"]["Value"] == {"Ref": "DeployDocument"}
+    assert outputs["InstanceId"]["Value"] == {"Ref": "Instance"}
+    for name, variable in [
+        ("GitHubDeployRoleArn", "AWS_DEPLOY_ROLE_ARN"),
+        ("DeployDocumentName", "AWS_DEPLOY_DOCUMENT"),
+        ("InstanceId", "AWS_INSTANCE_ID"),
+    ]:
+        assert variable in outputs[name]["Description"]
+    assert "GitHubOidcProviderArn" in outputs

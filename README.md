@@ -452,6 +452,9 @@ is no RDS, load balancer, NAT gateway, ECS or autoscaling. The instance uses `co
   Stack creation finishes only when the app is healthy.
 - No secrets in Git: the database password is generated on the instance, and the GitHub deploy
   key lives in SSM Parameter Store.
+- Continuous deployment: every push to `main` that passes CI is deployed as that exact commit.
+  GitHub Actions authenticates with OIDC (no AWS access keys), as a role that can only run
+  `spendwise-deploy <commit SHA>` on this instance through SSM.
 
 [deploy/aws/README.md](deploy/aws/README.md) has the architecture, the free-tier and cost
 details, the security notes and the exact commands. Check the templates locally (no AWS
@@ -777,7 +780,8 @@ also fails if the page throws an uncaught error or the server answers 5xx.
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs the complete suite on every pull request to `main`, on every
-push to `main`, and on demand (Run workflow). Nothing is deployed and no secrets are used.
+push to `main`, and on demand (Run workflow). No secrets are used. After a push to `main` passes
+every job, it deploys that commit to AWS (the last row below).
 
 | Job | What it runs | Same thing locally |
 |---|---|---|
@@ -787,6 +791,7 @@ push to `main`, and on demand (Run workflow). Nothing is deployed and no secrets
 | Integration | builds the image and runs the real Compose stack (PostgreSQL), then the integration suite | `make integration` |
 | End-to-end | builds the image and runs the real Compose stack, then Playwright (Chromium, desktop and phone) | `make e2e` |
 | All checks passed | succeeds only if every job above succeeded | |
+| Deploy to AWS | push to `main` only, after All checks passed: OIDC credentials (no AWS keys), SSM runs `spendwise-deploy <commit SHA>` on the instance, then checks `/api/health` and `/api/health/ready` ([details](deploy/aws/README.md#automatic-deploys-from-github-actions-oidc)) | `sudo spendwise-deploy <sha>` on the instance |
 
 The five test jobs run in parallel; a full run takes roughly as long as the slowest job,
 End-to-end, which builds the image and installs Chromium before the tests. Use "All checks
@@ -812,7 +817,11 @@ Docker image is built from scratch in each job, so a run never depends on a stal
 
 **Security.** The workflow token is read-only (`contents: read`), checkout does not keep the
 token in the repository's git config, every action is pinned to a full commit SHA, and no step
-uses repository secrets. Pull requests from forks run with the same read-only token.
+uses repository secrets. Pull requests from forks run with the same read-only token. Only the
+deploy job, which never runs for pull requests, may request an OIDC token (`id-token: write`).
+AWS accepts that token only from pushes to `main` of this repository. The deploy settings are
+repository variables (`AWS_REGION`, `AWS_DEPLOY_ROLE_ARN`, `AWS_INSTANCE_ID`,
+`AWS_DEPLOY_DOCUMENT`, `PRODUCTION_URL`); until they exist the deploy job is skipped.
 
 ## Checks
 
