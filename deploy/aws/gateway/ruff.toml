@@ -1,0 +1,2 @@
+# The gateway is checked with the backend's ruff settings (CI's backend job lints this directory).
+extend = "../../../backend/pyproject.toml"

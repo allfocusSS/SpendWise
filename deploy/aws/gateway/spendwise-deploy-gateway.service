@@ -1,0 +1,35 @@
+# Installed as /etc/systemd/system/spendwise-deploy-gateway.service by install-gateway.sh.
+#
+# The deploy gateway: verifies GitHub Actions OIDC tokens and runs the one deploy wrapper through
+# sudo. It listens on a Unix socket only, which Caddy reaches through a bind mount.
+#
+# Not used here on purpose: NoNewPrivileges= and the sandboxing options that imply it would stop
+# sudo, and file-system protections (ProtectSystem=, ProtectHome=, ...) would also confine the
+# root deploy that runs inside this unit. The user's own isolation is checked by
+# `install-gateway.sh --verify` instead.
+[Unit]
+Description=SpendWise deploy gateway (GitHub Actions OIDC)
+Documentation=https://github.com/allfocusSS/SpendWise/blob/main/deploy/aws/README.md
+Requires=spendwise-deploy-gateway-no-imds.service
+After=spendwise-deploy-gateway-no-imds.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=spendwise-deploy-gateway
+Group=spendwise-deploy-gateway
+EnvironmentFile=/etc/spendwise/deploy-gateway.env
+ExecStart=/usr/local/lib/spendwise-deploy-gateway/venv/bin/python -I /usr/local/lib/spendwise-deploy-gateway/spendwise_deploy_gateway.py
+# /var/lib/spendwise-deploy-gateway: used token IDs, deploy history and bounded deploy logs.
+StateDirectory=spendwise-deploy-gateway
+StateDirectoryMode=0700
+PrivateTmp=yes
+Restart=on-failure
+RestartSec=5
+# Stopping the gateway also stops a deploy it started (it runs in this unit), so the installer
+# does not restart the gateway while a deploy holds the lock.
+KillMode=control-group
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

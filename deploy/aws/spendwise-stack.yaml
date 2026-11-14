@@ -90,14 +90,15 @@ Parameters:
       the Elastic IP itself (a Let's Encrypt IP address certificate).
   GitHubDeployMode:
     Type: String
-    Default: self-hosted-runner
-    AllowedValues: [self-hosted-runner, oidc-ssm]
+    Default: oidc-gateway
+    AllowedValues: [oidc-gateway, oidc-ssm]
     Description: >-
-      self-hosted-runner (the default) creates no AWS resources for deploys: a GitHub Actions
-      runner on the instance deploys (deploy/aws/README.md, Mode B). Required in AWS Free Tier
-      Projects, whose Service Control Policy (DenyIAMRestrictedActions) denies iam:*Provider*.
-      oidc-ssm creates the GitHub OIDC provider, a deploy role and an SSM document (Mode A),
-      for accounts without that SCP.
+      oidc-gateway (the default) creates no AWS resources for deploys: the deploy gateway on the
+      instance verifies GitHub's OIDC tokens itself (deploy/aws/README.md, Mode B; installed with
+      deploy/aws/gateway/install-gateway.sh). Required in AWS Free Tier Projects, whose Service
+      Control Policy (DenyIAMRestrictedActions) denies iam:*Provider*. oidc-ssm creates the
+      GitHub OIDC provider, a deploy role and an SSM document (Mode A), for accounts without
+      that SCP.
   GitHubOwnerId:
     Type: String
     Default: "189591398"

@@ -5,5 +5,37 @@
 }
 
 {$SPENDWISE_SITE_ADDRESS} {
-    reverse_proxy app:8000
+    # The deploy gateway (deploy/aws/gateway/), a separate service on the host, not the app.
+    # Only POST /_deploy with a small body reaches it, over its Unix socket (bind-mounted
+    # read-only in compose.aws.yaml): the gateway has no network port. It authenticates every
+    # request itself (GitHub Actions OIDC). No access log is configured, and Caddy never logs
+    # Authorization headers in any case.
+    handle /_deploy {
+        @post method POST
+        handle @post {
+            request_body {
+                max_size 4KB
+            }
+            reverse_proxy unix//run/spendwise-deploy-gateway/gateway.sock {
+                transport http {
+                    dial_timeout 5s
+                    # The gateway answers at once and deploys in the background; 60 s covers
+                    # fetching GitHub's signing keys.
+                    response_header_timeout 60s
+                }
+            }
+        }
+        handle {
+            header Allow POST
+            respond 405
+        }
+    }
+    # Nothing under /_deploy/ exists; it never falls through to the app either.
+    handle /_deploy/* {
+        respond 404
+    }
+
+    handle {
+        reverse_proxy app:8000
+    }
 }

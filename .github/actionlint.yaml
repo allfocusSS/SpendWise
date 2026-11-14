@@ -1,5 +1,0 @@
-# actionlint settings. spendwise-deploy is the label of the self-hosted deploy runner on the
-# AWS instance (deploy/aws/README.md); only the deploy-aws job in ci.yml may use it.
-self-hosted-runner:
-  labels:
-    - spendwise-deploy

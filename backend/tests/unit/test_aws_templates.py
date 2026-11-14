@@ -207,6 +207,56 @@ def test_compose_additions_publish_only_caddy() -> None:
     assert "ports" not in services["app"]
     assert "db" not in services
     assert services["caddy"]["ports"] == ["80:80", "443:443"]
+    # No service at all for the deploy gateway, and no other published port.
+    assert set(services) == {"app", "caddy"}
+    assert "network_mode" not in services["caddy"]
+
+
+def test_caddy_reaches_the_deploy_gateway_through_a_read_only_socket_mount() -> None:
+    compose = yaml.safe_load((AWS_DIR / "compose.aws.yaml").read_text())
+    volumes = compose["services"]["caddy"]["volumes"]
+    gateway = [v for v in volumes if "spendwise-deploy-gateway" in v]
+    assert gateway == ["/run/spendwise-deploy-gateway:/run/spendwise-deploy-gateway:ro"]
+    # The same directory the gateway's tmpfiles.d entry creates and its settings listen in.
+    tmpfiles = (AWS_DIR / "gateway" / "spendwise-deploy-gateway.tmpfiles.conf").read_text()
+    assert "d /run/spendwise-deploy-gateway 0750 spendwise-deploy-gateway" in tmpfiles
+    settings = (AWS_DIR / "gateway" / "deploy-gateway.env").read_text()
+    assert "DEPLOY_GATEWAY_SOCKET=/run/spendwise-deploy-gateway/gateway.sock\n" in settings
+    # The base Compose file (local, CI, Railway) knows nothing about it.
+    assert "spendwise-deploy-gateway" not in (AWS_DIR.parents[1] / "compose.yaml").read_text()
+
+
+def caddy_site() -> str:
+    text = (AWS_DIR / "Caddyfile").read_text()
+    return text[text.index("{$SPENDWISE_SITE_ADDRESS} {") :]
+
+
+def test_caddy_sends_only_post_deploy_to_the_gateway() -> None:
+    site = caddy_site()
+    deploy = site[site.index("handle /_deploy {") : site.index("handle /_deploy/* {")]
+    # POST only, a small body, to the Unix socket; everything else on /_deploy is a 405.
+    assert "@post method POST" in deploy
+    assert "handle @post {" in deploy
+    assert "max_size 4KB" in deploy
+    assert "reverse_proxy unix//run/spendwise-deploy-gateway/gateway.sock {" in deploy
+    assert "header Allow POST" in deploy and "respond 405" in deploy
+    assert "app:8000" not in deploy
+    # Anything under /_deploy/ is a 404 and never reaches the app either.
+    assert re.search(r"handle /_deploy/\* \{\s+respond 404\s+\}", site)
+    # Only one gateway route, and the rest of the site still goes to the app.
+    assert site.count("unix//run/spendwise-deploy-gateway") == 1
+    assert site.count("reverse_proxy") == 2
+    assert re.search(r"\n    handle \{\s+reverse_proxy app:8000\s+\}", site)
+    # No access log (which could record request details).
+    assert not re.search(r"^\s*log\b", site, re.M)
+    # Only HTTP/1.1 and HTTP/2, as before.
+    assert "protocols h1 h2" in (AWS_DIR / "Caddyfile").read_text()
+
+
+def test_the_gateway_upstream_has_bounded_timeouts() -> None:
+    site = caddy_site()
+    assert "dial_timeout 5s" in site
+    assert "response_header_timeout 60s" in site
 
 
 def test_database_lives_on_the_data_volume() -> None:
@@ -218,9 +268,10 @@ def test_database_lives_on_the_data_volume() -> None:
 
 # --- Continuous deployment from GitHub Actions (Issue #11) ---
 #
-# Mode B, the default (GitHubDeployMode=self-hosted-runner): AWS Free Tier Projects have a Service
+# Mode B, the default (GitHubDeployMode=oidc-gateway): AWS Free Tier Projects have a Service
 # Control Policy (DenyIAMRestrictedActions) that denies iam:*Provider*, so the stack must create
-# no OIDC provider; a runner on the instance deploys. Mode A (oidc-ssm) adds the OIDC resources.
+# no OIDC provider; the deploy gateway on the instance verifies GitHub's tokens itself. Mode A
+# (oidc-ssm) adds the OIDC resources.
 OIDC_RESOURCES = {"GitHubOidcProvider", "DeployDocument", "GitHubDeployRole"}
 OIDC_OUTPUTS = {"GitHubDeployRoleArn", "DeployDocumentName", "GitHubOidcProviderArn"}
 
@@ -294,8 +345,8 @@ def deploy_statements(stack: dict[str, Any]) -> list[dict[str, Any]]:
 
 def test_free_tier_mode_is_the_default_and_creates_no_oidc_resources(stack) -> None:
     mode = stack["Parameters"]["GitHubDeployMode"]
-    assert mode["Default"] == "self-hosted-runner"
-    assert set(mode["AllowedValues"]) == {"self-hosted-runner", "oidc-ssm"}
+    assert mode["Default"] == "oidc-gateway"
+    assert set(mode["AllowedValues"]) == {"oidc-gateway", "oidc-ssm"}
     resources_ = created(stack, "Resources", {})
     assert not OIDC_RESOURCES & resources_
     assert not OIDC_OUTPUTS & created(stack, "Outputs", {})

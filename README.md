@@ -16,10 +16,14 @@ and analytics (see [Accounts and security](#accounts-and-security)).
 > - **AWS: production live** at <https://54.79.77.189.nip.io>: one EC2 instance in
 >   `ap-southeast-2`, created from the CloudFormation templates in `deploy/aws/` (see
 >   [Deploy to AWS](#deploy-to-aws-ec2--cloudformation)).
->   - **Continuous deployment** to it uses the AWS Free Tier Project fallback: a constrained
->     self-hosted runner on the instance. GitHub OIDC is blocked there, because the account's
->     Service Control Policy denies `iam:*Provider*`.
->   - The GitHub OIDC + SSM mode is implemented but untested against AWS
+>   - **Continuous deployment** to it is being moved to a GitHub OIDC deploy gateway on the
+>     instance: a GitHub-hosted job sends a GitHub OIDC token, which the gateway verifies before
+>     deploying that exact commit. AWS can't verify GitHub's tokens itself here, because the AWS
+>     Free Tier Project's Service Control Policy denies `iam:*Provider*`. The earlier self-hosted
+>     runner fallback was abandoned after GitHub's runner registration kept failing (HTTP 404).
+>   - The gateway is implemented and tested locally, but **not yet installed on the instance**,
+>     and no automatic deploy has run through it yet. The GitHub OIDC + SSM mode, for accounts
+>     that permit IAM federation, is implemented but untested against AWS
 >     ([details](deploy/aws/README.md#automatic-deploys-from-github-actions)).
 > - **Railway: prepared, not deployed.** New-account signup was unavailable at deployment time
 >   (see [Deploy to Railway](#deploy-to-railway)).
@@ -459,10 +463,13 @@ is no RDS, load balancer, NAT gateway, ECS or autoscaling. The instance uses `co
 - No secrets in Git: the database password is generated on the instance, and the GitHub deploy
   key lives in SSM Parameter Store.
 - Continuous deployment: every push to `main` that passes CI is deployed as that exact commit,
-  with no AWS access keys. This account is an AWS Free Tier Project, whose Service Control Policy
-  denies `iam:*Provider*`. So a self-hosted runner on the instance deploys, through a sudo
-  wrapper that accepts only the head of `main`. The GitHub OIDC + SSM alternative for standard
-  accounts is in the template but off by default, and is untested against AWS here.
+  with no AWS access keys or other long-lived secrets. This account is an AWS Free Tier Project,
+  whose Service Control Policy denies `iam:*Provider*`, so AWS can't trust GitHub's OIDC tokens.
+  Instead a deploy gateway on the instance verifies them (signature, exact repository, branch,
+  event, workflow and commit claims, single use). It is reached through Caddy on 443 with no new
+  port, and may only run a root wrapper that deploys the head of `main`. It is not yet installed
+  on the instance. The GitHub OIDC + SSM alternative, for accounts that permit IAM federation, is
+  in the template but off by default, and is untested against AWS here.
 
 [deploy/aws/README.md](deploy/aws/README.md) has the architecture, the free-tier and cost
 details, the security notes and the exact commands. Check the templates locally (no AWS
@@ -793,13 +800,13 @@ every job, it deploys that commit to AWS (the last two rows below).
 
 | Job | What it runs | Same thing locally |
 |---|---|---|
-| Backend (lint + test) | Ruff lint and format check, pytest on SQLite, OpenAPI spec up to date | `cd backend && uv run ruff check . && uv run ruff format --check . && uv run pytest && uv run python scripts/export_openapi.py --check` |
+| Backend (lint + test) | Ruff lint and format check (also of the AWS deploy gateway), pytest on SQLite, OpenAPI spec up to date | `cd backend && uv run ruff check . ../deploy/aws/gateway && uv run ruff format --check . ../deploy/aws/gateway && uv run pytest && uv run python scripts/export_openapi.py --check` |
 | Backend (PostgreSQL) | the same pytest suite against a PostgreSQL 18 service container | `cd backend && TEST_DATABASE_URL=postgresql+psycopg://... uv run pytest` (see [Run the tests on PostgreSQL](#run-the-tests-on-postgresql)) |
 | Frontend | oxlint, generated API types match `openapi.json`, typecheck (app and e2e tests), Vitest, production build | `cd frontend && npm ci && npm run lint && npm run generate:api && git diff --exit-code src/api/schema.d.ts && npm run typecheck && npm test && npm run build` |
 | Integration | builds the image and runs the real Compose stack (PostgreSQL), then the integration suite | `make integration` |
 | End-to-end | builds the image and runs the real Compose stack, then Playwright (Chromium, desktop and phone) | `make e2e` |
 | All checks passed | succeeds only if every job above succeeded | |
-| Deploy to AWS (self-hosted runner) | push to `main` only, after All checks passed, when `AWS_DEPLOY_MODE=self-hosted-runner`: the runner on the instance deploys that commit through a narrow sudo wrapper, then checks `/api/health`, `/api/health/ready` and `/` ([details](deploy/aws/README.md#automatic-deploys-from-github-actions)) | `sudo spendwise-deploy <sha>` on the instance |
+| Deploy to AWS (OIDC deploy gateway) | push to `main` only, after All checks passed, when `AWS_DEPLOY_MODE=oidc-gateway`: sends a GitHub OIDC token to the deploy gateway on the instance (`POST /_deploy`), which verifies it and deploys that commit; polls for the result, then checks `/api/health`, `/api/health/ready` and `/` ([details](deploy/aws/README.md#automatic-deploys-from-github-actions)) | `sudo spendwise-deploy <sha>` on the instance |
 | Deploy to AWS (OIDC + SSM) | the same, when `AWS_DEPLOY_MODE=oidc-ssm` (accounts that allow an IAM OIDC provider): OIDC credentials, SSM Run Command | |
 
 The five test jobs run in parallel; a full run takes roughly as long as the slowest job,
@@ -828,10 +835,10 @@ Docker image is built from scratch in each job, so a run never depends on a stal
 token in the repository's git config, every action is pinned to a full commit SHA, and no step
 uses repository secrets. Pull requests from forks run with the same read-only token.
 
-Every job except the self-hosted deploy runs on GitHub-hosted runners. The deploy jobs never run
-for pull requests. The runner on the production instance accepts only the `deploy-aws` job of a
-push to `main`; its job hook refuses anything else. Only the OIDC deploy job may request an OIDC
-token (`id-token: write`). Deploy settings are repository variables (`AWS_DEPLOY_MODE`,
+Every job runs on GitHub-hosted runners. The deploy jobs never run for pull requests, and only
+they may request an OIDC token (`id-token: write`; the gateway job gets nothing else). The
+deploy gateway accepts only tokens for a push to `main` of this repository by `ci.yml` on a
+GitHub-hosted runner, each once. Deploy settings are repository variables (`AWS_DEPLOY_MODE`,
 `PRODUCTION_URL`, plus `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN`, `AWS_INSTANCE_ID` and
 `AWS_DEPLOY_DOCUMENT` for OIDC). With `AWS_DEPLOY_MODE` unset, nothing is deployed. Protect
 `main` with a required pull request and the "All checks passed" check.

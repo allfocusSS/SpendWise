@@ -29,6 +29,10 @@ services:
       # Certificates and the ACME account, kept on the data volume so a restart or a new
       # instance does not request them again.
       - ${SPENDWISE_DATA_DIR:?set in /etc/spendwise/deploy.env}/caddy:/data
+      # The deploy gateway's Unix socket (deploy/aws/gateway/), for POST /_deploy only. A
+      # directory, created at boot by the gateway's tmpfiles.d entry; read-only (connecting to
+      # a socket needs no write access to the mount). No port is published for the gateway.
+      - /run/spendwise-deploy-gateway:/run/spendwise-deploy-gateway:ro
     restart: unless-stopped
 
 volumes:

@@ -1,0 +1,17 @@
+# Installed as /etc/systemd/system/spendwise-deploy-gateway-no-imds.service by install-gateway.sh.
+# The deploy gateway's user never needs the instance metadata service, so it cannot reach it, and
+# with it the instance role's credentials. Root (and so spendwise-deploy), Docker and the SSM
+# agent are not affected.
+[Unit]
+Description=Block instance metadata (IMDS) for the SpendWise deploy gateway's user
+After=network-pre.target
+Before=network-online.target spendwise-deploy-gateway.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/iptables -w -I OUTPUT -d 169.254.169.254/32 -m owner --uid-owner spendwise-deploy-gateway -j REJECT
+ExecStop=/usr/sbin/iptables -w -D OUTPUT -d 169.254.169.254/32 -m owner --uid-owner spendwise-deploy-gateway -j REJECT
+
+[Install]
+WantedBy=multi-user.target
