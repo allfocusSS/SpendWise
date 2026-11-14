@@ -1,0 +1,27 @@
+#!/bin/bash
+# Installed root-owned as /usr/local/sbin/spendwise-deploy-sha by install-runner.sh. The only
+# command the deploy runner's user (spendwise-runner) may run as root, through sudo:
+#
+#   sudo -n /usr/local/sbin/spendwise-deploy-sha <40-character lowercase commit SHA>
+#
+# It deploys that commit with spendwise-deploy, and only if it is the current head of main, so
+# the runner can neither run other root commands nor deploy a branch, tag or pull request.
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+
+if [ "$#" -ne 1 ] || ! [[ $1 =~ ^[0-9a-f]{40}$ ]]; then
+  echo "usage: spendwise-deploy-sha <40-character lowercase commit SHA>" >&2
+  exit 64
+fi
+sha=$1
+
+# GITHUB_REPOSITORY (owner/name), written at first boot; root-owned.
+# shellcheck source=/dev/null
+. /etc/spendwise/deploy.env
+head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)
+if [ "$head" != "$sha" ]; then
+  echo "Refusing to deploy $sha: it is not the head of main (${head:-unknown})." >&2
+  exit 65
+fi
+
+exec /usr/local/bin/spendwise-deploy "$sha"

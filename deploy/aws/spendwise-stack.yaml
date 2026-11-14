@@ -16,6 +16,9 @@ Metadata:
         Parameters: [DataVolumeSize, ExistingDataVolumeId]
       - Label: { default: Application }
         Parameters: [GitHubRepository, GitRef, DeployKeyParameterName, DomainName]
+      - Label: { default: Continuous deployment from GitHub Actions }
+        Parameters:
+          [GitHubDeployMode, GitHubOwnerId, GitHubRepositoryId, GitHubDeployBranch, ExistingGitHubOidcProviderArn]
 
 Parameters:
   ImageId:
@@ -85,12 +88,52 @@ Parameters:
     Description: >-
       Optional. A name whose DNS A record points at the stack's Elastic IP. Empty serves HTTPS on
       the Elastic IP itself (a Let's Encrypt IP address certificate).
+  GitHubDeployMode:
+    Type: String
+    Default: self-hosted-runner
+    AllowedValues: [self-hosted-runner, oidc-ssm]
+    Description: >-
+      self-hosted-runner (the default) creates no AWS resources for deploys: a GitHub Actions
+      runner on the instance deploys (deploy/aws/README.md, Mode B). Required in AWS Free Tier
+      Projects, whose Service Control Policy (DenyIAMRestrictedActions) denies iam:*Provider*.
+      oidc-ssm creates the GitHub OIDC provider, a deploy role and an SSM document (Mode A),
+      for accounts without that SCP.
+  GitHubOwnerId:
+    Type: String
+    Default: "189591398"
+    AllowedPattern: ^[0-9]+$
+    Description: >-
+      Numeric ID of the GitHubRepository owner (gh api repos/OWNER/REPO --jq .owner.id). Part of
+      the immutable OIDC subject that GitHub Actions deploys are trusted by.
+  GitHubRepositoryId:
+    Type: String
+    Default: "1441102769"
+    AllowedPattern: ^[0-9]+$
+    Description: >-
+      Numeric ID of GitHubRepository (gh api repos/OWNER/REPO --jq .id). A renamed, transferred or
+      re-created repository gets a new ID, so it cannot reuse the trust.
+  GitHubDeployBranch:
+    Type: String
+    Default: main
+    AllowedPattern: ^[A-Za-z0-9._/-]+$
+    Description: The only branch whose GitHub Actions runs may assume the deploy role.
+  ExistingGitHubOidcProviderArn:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^arn:aws[a-z-]*:iam::[0-9]{12}:oidc-provider/token\.actions\.githubusercontent\.com$
+    Description: >-
+      Optional. An account has at most one GitHub OIDC provider. Empty creates it in this stack;
+      pass the ARN of one that already exists (aws iam list-open-id-connect-providers) to reuse it.
 
 Conditions:
   CreateDataVolume: !Equals [!Ref ExistingDataVolumeId, ""]
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
   HasDeployKey: !Not [!Equals [!Ref DeployKeyParameterName, ""]]
   HasAvailabilityZone: !Not [!Equals [!Ref AvailabilityZone, ""]]
+  UseOidcDeploy: !Equals [!Ref GitHubDeployMode, oidc-ssm]
+  CreateGitHubOidcProvider: !And
+    - !Condition UseOidcDeploy
+    - !Equals [!Ref ExistingGitHubOidcProviderArn, ""]
 
 Resources:
   # --- Network: one public subnet in its own VPC. No NAT gateway, no private subnets: the only
@@ -487,6 +530,89 @@ Resources:
         # Building the image on a micro instance in standard CPU mode is slow (README).
         Timeout: PT60M
 
+  # --- Continuous deployment, Mode A (GitHubDeployMode=oidc-ssm only): GitHub Actions on main
+  # exchanges its OIDC token for short-lived credentials of GitHubDeployRole, which can only run
+  # DeployDocument on this one instance (deploy/aws/README.md). No AWS access keys exist
+  # anywhere. Mode B, the default, creates none of these three resources.
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateGitHubOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  # Instead of AWS-RunShellScript, which would let the role run any command as root: this
+  # document only runs spendwise-deploy, and only with a full commit SHA.
+  DeployDocument:
+    Type: AWS::SSM::Document
+    Condition: UseOidcDeploy
+    Properties:
+      Name: !Sub ${AWS::StackName}-deploy
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::EC2::Instance
+      # A template change adds a document version and makes it the default (no replacement).
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: "2.2"
+        description: Deploy one SpendWise commit with spendwise-deploy (deploy/aws/README.md).
+        parameters:
+          CommitSha:
+            type: String
+            description: Full 40-character Git commit SHA to deploy.
+            allowedPattern: ^[0-9a-f]{40}$
+        mainSteps:
+          - action: aws:runShellScript
+            name: deploy
+            inputs:
+              # Builds on the instance; a micro instance with few CPU credits is slow (README).
+              timeoutSeconds: "3000"
+              runCommand:
+                - /usr/local/bin/spendwise-deploy '{{ CommitSha }}'
+
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Condition: UseOidcDeploy
+    Properties:
+      Description: GitHub Actions deploys of one repository branch to the SpendWise instance, via SSM only
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateGitHubOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingGitHubOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              # Exact matches only. The subject is GitHub's immutable format, with the owner and
+              # repository IDs, for pushes to the one branch: other repositories, forks, branches,
+              # tags, pull requests and environments all get a different subject.
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub
+                  - repo:${Owner}@${GitHubOwnerId}/${Repository}@${GitHubRepositoryId}:ref:refs/heads/${GitHubDeployBranch}
+                  - Owner: !Select [0, !Split ["/", !Ref GitHubRepository]]
+                    Repository: !Select [1, !Split ["/", !Ref GitHubRepository]]
+      Policies:
+        - PolicyName: deploy-through-ssm
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # SendCommand needs both resources: the deploy document, on this instance only.
+              - Sid: RunTheDeployDocumentOnTheSpendWiseInstance
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${DeployDocument}
+              # GetCommandInvocation supports no resource-level permissions, so it needs "*". It
+              # only reads the status and output of commands already sent.
+              - Sid: ReadTheDeployResult
+                Effect: Allow
+                Action: ssm:GetCommandInvocation
+                Resource: "*"
+
 Outputs:
   SiteUrl:
     Description: SpendWise (HTTPS; the certificate is issued within a minute or two of startup)
@@ -498,6 +624,7 @@ Outputs:
     Description: Elastic IP (point a domain's A record here)
     Value: !Ref ElasticIp
   InstanceId:
+    Description: GitHub repository variable AWS_INSTANCE_ID
     Value: !Ref Instance
   DataVolumeId:
     Description: Retained when the stack is deleted; pass as ExistingDataVolumeId to reuse it
@@ -505,3 +632,15 @@ Outputs:
   SessionCommand:
     Description: Shell on the instance (needs the Session Manager plugin for the AWS CLI)
     Value: !Sub aws ssm start-session --region ${AWS::Region} --target ${Instance}
+  GitHubDeployRoleArn:
+    Condition: UseOidcDeploy
+    Description: GitHub repository variable AWS_DEPLOY_ROLE_ARN
+    Value: !GetAtt GitHubDeployRole.Arn
+  DeployDocumentName:
+    Condition: UseOidcDeploy
+    Description: GitHub repository variable AWS_DEPLOY_DOCUMENT
+    Value: !Ref DeployDocument
+  GitHubOidcProviderArn:
+    Condition: UseOidcDeploy
+    Description: Pass as ExistingGitHubOidcProviderArn to another stack in this account
+    Value: !If [CreateGitHubOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingGitHubOidcProviderArn]
