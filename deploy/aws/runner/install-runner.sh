@@ -98,6 +98,23 @@ verify_isolation() {
   [ "$failures" -eq 0 ]
 }
 
+# Registers the runner from the current directory (the runner's). The registration token is an
+# opaque GitHub value: it must not be empty, and is otherwise passed unchanged to the runner's own
+# config.sh, which checks with GitHub whether it is valid and unexpired. It is never echoed,
+# logged or written to a file, and is gone when the function returns.
+register_runner() {
+  local token
+  read -rsp "Runner registration token (not echoed): " token
+  echo
+  if [ -z "$token" ]; then
+    echo "No registration token given."
+    return 1
+  fi
+  runuser -u "$RUNNER_USER" -- env HOME="/home/$RUNNER_USER" ./config.sh --unattended \
+    --url "https://github.com/$GITHUB_REPOSITORY" --token "$token" \
+    --name "$RUNNER_NAME" --labels "$RUNNER_LABEL" --work _work --replace
+}
+
 if [ "${1:-}" = --verify ]; then
   verify_isolation
   exit
@@ -161,16 +178,7 @@ cd "$RUNNER_DIR"
 
 echo "== Registration with https://github.com/$GITHUB_REPOSITORY"
 if [ ! -f .runner ]; then
-  read -rsp "Runner registration token (not echoed): " token
-  echo
-  if ! [[ $token =~ ^[A-Za-z0-9_-]{20,}$ ]]; then
-    echo "That does not look like a registration token."
-    exit 1
-  fi
-  runuser -u "$RUNNER_USER" -- env HOME="/home/$RUNNER_USER" ./config.sh --unattended \
-    --url "https://github.com/$GITHUB_REPOSITORY" --token "$token" \
-    --name "$RUNNER_NAME" --labels "$RUNNER_LABEL" --work _work --replace
-  unset token
+  register_runner
 fi
 
 echo "== Job hook: refuse every job except deploy-aws on a push to main"
