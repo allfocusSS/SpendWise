@@ -166,9 +166,96 @@ def test_installer_gives_the_runner_user_no_route_to_root() -> None:
 def test_installer_keeps_no_github_token() -> None:
     text = INSTALLER.read_text()
     assert 'read -rsp "Runner registration token' in text  # read from the terminal, not echoed
-    assert "unset token" in text
+    assert "local token" in text  # gone when registration returns
     assert not re.search(r"\$token[^\n]*>", text)  # never written to a file
+    assert not re.search(r"echo[^\n]*\$token", text)  # never printed
+    assert "set -x" not in text
     assert "ghp_" not in text and "github_pat_" not in text
+
+
+def test_installer_does_not_guess_the_registration_token_format() -> None:
+    # Registration tokens are opaque: GitHub's config.sh decides whether one is valid.
+    text = INSTALLER.read_text()
+    assert not re.search(r"\$\{?token\b[^\n]*=~", text)
+    assert "${#token}" not in text
+    assert 'if [ -z "$token" ]; then' in text
+    assert '--token "$token"' in text
+
+
+@pytest.fixture
+def register(tmp_path: Path):
+    """Runs the installer's register_runner with stand-ins for runuser and the runner's config.sh.
+
+    The stub config.sh records each argument it receives, one per line, in config.args.
+    """
+    function = re.search(r"^register_runner\(\) \{\n.*?^\}\n", INSTALLER.read_text(), re.M | re.S)
+    assert function
+    config = tmp_path / "config.sh"
+    config.write_text("#!/bin/bash\nprintf '%s\\n' \"$@\" > config.args\n")
+    config.chmod(0o755)
+    script = tmp_path / "register.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        "RUNNER_USER=spendwise-runner RUNNER_NAME=spendwise-ec2 RUNNER_LABEL=spendwise-deploy\n"
+        f"GITHUB_REPOSITORY={REPOSITORY}\n"
+        'runuser() { [ "$1 $2 $3" = "-u $RUNNER_USER --" ] && shift 3 && "$@"; }\n'
+        f"{function.group(0)}"
+        "register_runner\n"
+    )
+
+    def run_with(stdin: str) -> tuple[subprocess.CompletedProcess, list[str] | None]:
+        result = subprocess.run(
+            ["bash", str(script)],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+            timeout=30,
+        )
+        args = tmp_path / "config.args"
+        return result, args.read_text().splitlines() if args.exists() else None
+
+    return run_with
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        # Regression: a real registration token was 29 characters; it must reach config.sh.
+        "A3KQ7ZP4XW9MNB2RT6VYC8DLHJ5EF",
+        # No length, prefix or alphabet is assumed.
+        "abc",
+        "ghs_" + "x" * 60,
+        "Zm9v.YmFy+/=~:-_",
+    ],
+)
+def test_registration_passes_an_opaque_token_unchanged_to_config_sh(register, token) -> None:
+    result, args = register(token + "\n")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert args is not None
+    assert args[args.index("--token") + 1] == token
+    assert args[: args.index("--token")] == [
+        "--unattended",
+        "--url",
+        f"https://github.com/{REPOSITORY}",
+    ]
+    assert token not in result.stdout + result.stderr  # never echoed or logged
+
+
+def test_registration_of_a_29_character_token(register) -> None:
+    token = "A3KQ7ZP4XW9MNB2RT6VYC8DLHJ5EF"
+    assert len(token) == 29
+    result, args = register(token + "\n")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert args is not None and args.count(token) == 1
+
+
+@pytest.mark.parametrize("stdin", ["\n", "   \n", ""])
+def test_registration_refuses_an_empty_token(register, stdin) -> None:
+    result, args = register(stdin)
+    assert result.returncode != 0
+    assert args is None  # config.sh never ran
 
 
 def test_installer_downloads_a_pinned_checksum_verified_runner() -> None:
