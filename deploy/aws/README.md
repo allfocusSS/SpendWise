@@ -12,6 +12,7 @@ EC2 instance (Amazon Linux 2023, t3.micro) ── Elastic IP ── HTTPS :443 /
         │
 Docker Compose (compose.yaml + deploy/aws/compose.aws.yaml)
    ├── caddy    ports 80/443, automatic Let's Encrypt certificate, proxies to app:8000
+   │            (and POST /_deploy to the deploy gateway's Unix socket on the host)
    ├── app      SpendWise image (UI + API), not published
    └── db       PostgreSQL 18, not published
         │
@@ -26,7 +27,8 @@ EBS data volume (encrypted, retained) at /srv/spendwise
 | `budget.yaml` | A monthly AWS Budget with email alerts. Deploy it **first**. |
 | `spendwise-stack.yaml` | The network, security group, IAM roles, data volume, Elastic IP and instance, and the GitHub Actions deploy role. |
 | `compose.aws.yaml` | EC2 additions to `compose.yaml`: Caddy and the database on the data volume. |
-| `Caddyfile` | HTTPS and the reverse proxy. |
+| `Caddyfile` | HTTPS and the reverse proxy, plus the `POST /_deploy` route to the deploy gateway. |
+| `gateway/` | The deploy gateway (Mode B of [Automatic deploys](#automatic-deploys-from-github-actions)): the program, its installer, systemd units, root wrapper and sudo rule. |
 
 Nothing in these files is secret. The database password is generated on the instance at first
 boot. The GitHub deploy key is stored in SSM Parameter Store, which you do yourself.
@@ -113,11 +115,13 @@ email alerts are all free.
   instance's credentials.
 - **Outbound traffic:** TCP 80 and 443 only. Git over SSH uses `ssh.github.com:443`, with
   GitHub's published host keys pinned.
-- **Deploys from GitHub Actions:** no AWS access keys exist (see [Automatic deploys](#automatic-deploys-from-github-actions)).
-  - In this account (Mode B), a runner on the instance deploys. It runs as an unprivileged user
-    that may only run a root-owned wrapper through sudo, for the current head of `main`. Its job
-    hook refuses every job but the `main` deploy, and it can't reach the instance metadata
-    service.
+- **Deploys from GitHub Actions:** no AWS access keys or other long-lived secrets exist (see
+  [Automatic deploys](#automatic-deploys-from-github-actions)).
+  - In this account (Mode B), a GitHub-hosted job sends a GitHub OIDC token to the deploy
+    gateway on the instance, through Caddy on 443 (no new port). The gateway verifies the
+    token's signature and exact claims, accepts each token once, and runs as an unprivileged
+    user. That user may only run a root-owned wrapper through sudo, for the current head of
+    `main`, and can't reach Docker, the database password or the instance metadata service.
   - In Mode A, each run gets one-hour OIDC credentials for a role that can only run
     `spendwise-deploy <commit SHA>` on this instance.
 
@@ -272,203 +276,419 @@ $c logs --tail 100 app    # application log (caddy: certificates)
 ## Automatic deploys from GitHub Actions
 
 Every push to `main` that passes the whole CI suite is deployed to the instance as that exact
-commit (`github.sha`, never `main`). No AWS access key exists anywhere. There are two ways to do
-it. The repository variable `AWS_DEPLOY_MODE` chooses the workflow job, and the stack parameter
+commit (`github.sha`, never `main`). No AWS access key, GitHub token or other long-lived secret
+exists anywhere, and every job runs on a GitHub-hosted runner. There are two ways to do it. The
+repository variable `AWS_DEPLOY_MODE` chooses the workflow job, and the stack parameter
 `GitHubDeployMode` chooses the AWS resources:
 
-| | Mode B: self-hosted deploy runner | Mode A: GitHub OIDC and SSM |
+| | Mode B: GitHub OIDC → SpendWise deploy gateway | Mode A: GitHub OIDC → AWS IAM → SSM |
 |---|---|---|
-| For | **AWS Free Tier Projects (this account)** | standard AWS accounts |
-| `GitHubDeployMode` (stack) | `self-hosted-runner` (the default) | `oidc-ssm` |
-| `AWS_DEPLOY_MODE` (GitHub) | `self-hosted-runner` | `oidc-ssm` |
-| Workflow job | `deploy-aws`, on the instance's own runner | `deploy-aws-oidc`, on a GitHub-hosted runner |
-| AWS credentials used | none | one-hour role credentials from GitHub's OIDC token |
+| For | **AWS Free Tier Projects (this account)**, whose SCP blocks `iam:*Provider*` | AWS accounts that permit IAM federation |
+| `GitHubDeployMode` (stack) | `oidc-gateway` (the default) | `oidc-ssm` |
+| `AWS_DEPLOY_MODE` (GitHub) | `oidc-gateway` | `oidc-ssm` |
+| Workflow job | `deploy-aws`, GitHub-hosted | `deploy-aws-oidc`, GitHub-hosted |
+| Who checks GitHub's token | the gateway on the instance (`deploy/aws/gateway/`) | AWS STS, through an IAM OIDC provider |
+| AWS credentials used | none | one-hour role credentials |
 | AWS resources for deploys | none | OIDC provider, deploy role, SSM document |
+| How the instance is reached | `POST https://<site>/_deploy`, through Caddy on 443 | SSM Run Command |
 
 With `AWS_DEPLOY_MODE` unset, neither job runs and nothing is deployed. Pull requests never
-deploy in either mode, and every CI job (backend, frontend, integration, end-to-end) always runs
-on GitHub-hosted runners.
+deploy in either mode.
 
-> **Which mode to use.**
->
-> - **GitHub recommends against self-hosted runners for public repositories.** This repository
->   is public.
-> - Mode B is a **constrained fallback**, used only because this account's AWS Free Tier Project
->   Service Control Policy blocks IAM OIDC providers (`iam:*Provider*`). Its constraints are
->   listed below.
-> - **The standard production recommendation remains Mode A:** GitHub OIDC with SSM, in an AWS
->   account that permits federation. It runs nothing on the production host on GitHub's behalf
->   and needs no runner. Move to it as soon as the deployment runs in such an account.
+> **Status (Issue #11).** Mode B is implemented and tested locally (token verification against
+> locally generated keys, the host files on Amazon Linux 2023, Caddy's routing), but it has
+> **not yet been installed on the instance, and no GitHub Actions deploy has run through it.**
+> That needs the one-time installation below and a first real push to `main`. Mode A is
+> implemented and its static tests pass, but it has **not** been tested against AWS: the SCP
+> described below makes that impossible in this account.
 
-> **Issue #11 status.** The OIDC implementation (Mode A) exists in the template and the
-> workflow, and its static tests pass. It has **not** been tested against AWS: this account is an
-> AWS Free Tier Project, and the organization's Service Control Policy denies `iam:*Provider*`,
-> so no IAM identity provider can be created or even read here. Issue #11's OIDC acceptance
-> criteria are therefore blocked in this account. Continuous deployment uses Mode B instead,
-> which also needs no long-lived AWS credentials.
-
-### Why this account can't use OIDC
+### Why this account can't use AWS IAM OIDC
 
 AWS Free Tier Projects belong to an AWS organization with a Service Control Policy (SCP). Its
 `DenyIAMRestrictedActions` statement denies `iam:*Provider*`. That covers
 `iam:CreateOpenIDConnectProvider`, `iam:GetOpenIDConnectProvider` and
 `iam:ListOpenIDConnectProviders`, which were confirmed as an explicit deny by the SCP in this
 account. An SCP sets the maximum permissions for every principal in the account, including the
-root user and roles with `AdministratorAccess`. No IAM policy in the account can override it. A
-role trusting GitHub needs an `AWS::IAM::OIDCProvider`, so Mode A can't work here. That's why
-the template creates no OIDC resources unless `GitHubDeployMode=oidc-ssm`, and the existing
-stack stays updateable with its defaults.
+root user and roles with `AdministratorAccess`: an explicit deny in an SCP can't be overridden by
+any IAM policy in the account. A role trusting GitHub needs an `AWS::IAM::OIDCProvider`, so AWS
+itself can't verify GitHub's tokens here. The template therefore creates no OIDC resources
+unless `GitHubDeployMode=oidc-ssm`.
 
-### Mode B: self-hosted deploy runner (AWS Free Tier Projects)
+### Why not a self-hosted runner
 
-A GitHub Actions runner on the instance itself picks up the `deploy-aws` job and deploys
-locally. It connects out to GitHub over HTTPS, so there's no new inbound port, no SSH and no AWS
-credential involved.
+The previous fallback, a persistent GitHub Actions runner on the instance, was abandoned:
+
+- GitHub recommends against self-hosted runners for public repositories, and this one is public.
+  It was only ever a constrained fallback.
+- Registering it failed every time with `POST https://api.github.com/actions/runner-registration`
+  → `HTTP 404 Not Found`, reproduced with a fresh repository registration token, runner 2.338.2,
+  a completely clean `/opt/actions-runner` and no stale `.runner` or `.credentials` files.
+
+Its files (`deploy/aws/runner/`) are gone. The instance may still have parts of the failed
+bootstrap; [Cleaning up the abandoned runner](#cleaning-up-the-abandoned-runner) removes them.
+
+### Mode B: GitHub OIDC deploy gateway (this account)
+
+GitHub can sign a short-lived OIDC token for any job that has `id-token: write`, describing
+exactly which repository, branch, event, workflow, runner and commit it runs for. Since AWS can't
+check that token here, a small service on the instance does: the **deploy gateway**. It isn't
+part of the SpendWise app or its login, and it shares nothing with them.
 
 ```
 push to main
   └─ CI on GitHub-hosted runners: backend, backend-postgres, frontend, integration, e2e
        └─ "All checks passed"
-            └─ deploy-aws (push to main of allfocusSS/SpendWise only; never pull requests)
-                 runs-on: [self-hosted, linux, spendwise-deploy]  ── the runner on the instance
-                 ├─ job-started hook: refuses any job but ci.yml / deploy-aws / push / main
+            └─ deploy-aws (push to main of allfocusSS/SpendWise only; GitHub-hosted runner)
+                 permissions: id-token: write (nothing else)
                  ├─ skip if main has moved on (git ls-remote)
-                 ├─ sudo -n /usr/local/sbin/spendwise-deploy-sha <github.sha>
-                 │    └─ checks the SHA format and that it is the head of main, then
-                 │       /usr/local/bin/spendwise-deploy <sha> as root
-                 │       (fetch, build, docker compose up --wait; fails unless healthy)
+                 ├─ OIDC token from GitHub, audience "spendwise-deploy" (masked, stdin only)
+                 ├─ POST https://<site>/_deploy  {"sha", "run_id", "run_attempt"}
+                 │    Caddy :443 ─► Unix socket ─► spendwise-deploy-gateway (no network port)
+                 │       ├─ RS256 signature with GitHub's published keys; exp, nbf, iat, iss, aud
+                 │       ├─ exact claims: repository + IDs, main, push, ci.yml, GitHub-hosted,
+                 │       │  sha / run_id / run_attempt equal to the body
+                 │       ├─ token ID (jti) not used before (SQLite)
+                 │       ├─ no other deploy running ─► 202 "running"
+                 │       └─ in the background: sudo -n /usr/local/sbin/spendwise-deploy-sha <sha>
+                 │            └─ as root: deploy lock, head of main?, then
+                 │               spendwise-deploy <sha> (fetch, build, compose up --wait), ≤ 50 min
+                 │            then GET https://<site>/api/health/ready
+                 ├─ every 20 s: POST again with a fresh token ─► "running" … "success"
                  └─ GET <PRODUCTION_URL>/api/health, /api/health/ready and / (bounded retries)
 ```
 
-#### How the runner's privileges are limited
+**Why start-then-poll rather than one long request:** building the image on a micro instance
+takes 20 to 45 minutes. An HTTPS request that stays silent that long, across the internet from
+a GitHub-hosted runner, is easily cut off by idle timeouts along the way. So the first request
+starts the deploy and returns at once, and the job asks for its status every 20 seconds. Each
+of those requests is authenticated the same way, with its own fresh token. There's no
+unauthenticated status endpoint.
 
-| Layer | What it enforces | File |
+#### The token: exact claims required
+
+The issuer is fixed in the program: `https://token.actions.githubusercontent.com`. The other
+values are in `deploy/aws/gateway/deploy-gateway.env`, confirmed with GitHub:
+
+```bash
+gh api repos/allfocusSS/SpendWise --jq '{id, owner_id: .owner.id}'      # 1441102769, 189591398
+gh api repos/allfocusSS/SpendWise/actions/oidc/customization/sub        # use_immutable_subject: true
+```
+
+| Claim | Required value |
+|---|---|
+| `iss` | `https://token.actions.githubusercontent.com` (exactly) |
+| `aud` | `spendwise-deploy` (exactly; a list is refused) |
+| `sub` | `repo:allfocusSS@189591398/SpendWise@1441102769:ref:refs/heads/main` (GitHub's immutable subject format, with the owner and repository IDs) |
+| `repository` | `allfocusSS/SpendWise` |
+| `repository_id` | `1441102769` |
+| `repository_owner_id` | `189591398` |
+| `ref` / `ref_type` | `refs/heads/main` / `branch` |
+| `event_name` | `push` |
+| `runner_environment` | `github-hosted` |
+| `workflow_ref` | `allfocusSS/SpendWise/.github/workflows/ci.yml@refs/heads/main` |
+| `sha`, `run_id`, `run_attempt` | equal to the request body's `sha`, `run_id`, `run_attempt` |
+| `jti` | present, not empty, never used before |
+| `exp`, `nbf`, `iat` | present and valid, with 60 s of clock skew; `iat` within the last 10 minutes |
+
+The repository name alone never authorizes anything: a renamed, transferred or re-created
+repository has another ID. Pull requests (`event_name`, `ref` and `sub` differ), tags, other
+branches, forks (another repository ID), other workflows, `workflow_dispatch` runs and tokens
+from self-hosted runners are all refused, even if a pull request edits the workflow file.
+
+#### How the token is verified
+
+- **Library:** [PyJWT](https://pyjwt.readthedocs.io/) 2.15.1 with `cryptography` for RSA, the
+  gateway's only third-party packages. They're installed from `requirements.txt`, which pins
+  every file by its SHA-256 (`pip install --require-hashes --only-binary :all:`). The standard
+  library has no JWT or RSA verification, and writing signature checks by hand is exactly what
+  the task should avoid.
+- **Keys:** from GitHub's OpenID discovery document
+  (`https://token.actions.githubusercontent.com/.well-known/openid-configuration`), then its
+  `jwks_uri`. Both are fetched over verified HTTPS, without following redirects. Discovery must
+  name the same issuer, and `jwks_uri` must be an HTTPS URL on the issuer's host. Nothing is
+  hardcoded.
+- **Algorithm:** `RS256` only, and only while discovery advertises it. `alg: none`, every HMAC
+  (`HS*`) algorithm, `RS512`, `PS256`, `ES256` and tokens without a `kid` are refused before any
+  key is used. The key is chosen by `kid` and must be an RSA signing key.
+- **Caching and rotation:** keys are cached for an hour. An unknown `kid` fetches them again,
+  at most once a minute, so GitHub's key rotation keeps working and junk tokens can't make the
+  gateway hammer GitHub.
+- **Failing closed:** if discovery or the keys can't be fetched or used, nothing is accepted
+  (`503 unavailable`), and the old keys aren't used after a failed refresh either.
+
+#### Replay protection
+
+Each token is accepted for exactly one request. After a token passes verification, the gateway
+inserts a SHA-256 of its `jti` into SQLite (`/var/lib/spendwise-deploy-gateway/gateway.sqlite3`,
+owned by the gateway, mode 0700 directory). The primary key makes the insert fail for a token ID
+already there. That holds for simultaneous requests too, and across restarts. Next to the hash it
+stores the expiry, time used, run ID, attempt and SHA, never the token. Rows are deleted one day
+after the token expired. A replayed token gets `409 replay_rejected`.
+
+#### Exact SHA
+
+- The workflow sends `${{ github.sha }}`, which the token's `sha` claim must match. A caller
+  can't choose a commit the token doesn't vouch for.
+- The SHA must be exactly 40 lowercase hex characters, checked by the gateway, by sudo's rule
+  and again by the wrapper.
+- The wrapper refuses a SHA that isn't the current head of `main` (`superseded`), so an old
+  run can't roll production back.
+
+#### One deploy at a time, and bounded
+
+- The gateway's database allows only one `running` deploy (a partial unique index). Another
+  run gets `409 busy`.
+- The root wrapper also takes a host lock, `flock` on `/run/spendwise-deploy.lock`, and exits
+  with `busy` if it's held. A manual deploy through the wrapper takes the same lock.
+- The workflow's `concurrency: deploy-aws-production` serializes the jobs as well.
+- The wrapper stops `spendwise-deploy` after 50 minutes (`timeout`, then `KILL` a minute
+  later). The gateway has its own backstop a minute after that.
+- The workflow polls for at most 55 minutes, and its job times out after 65.
+- The deploy runs in the background, so a client that disconnects changes nothing. If the
+  gateway itself is restarted mid-deploy, systemd stops the deploy with it, and the run is
+  reported as `interrupted`.
+- Output is bounded: the first 16 KiB and last 48 KiB of the wrapper's output, with tokens,
+  private keys, `…PASSWORD=`/`…SECRET=`/`…TOKEN=` values and URL passwords redacted. It's
+  written to `/var/lib/spendwise-deploy-gateway/logs/deploy-<run>-<attempt>.log` (mode 0600; the
+  last 30 are kept). It is **never** returned to GitHub.
+
+#### Answers
+
+All answers are small JSON objects: `{"status": …}`. The deploy's own status also has `sha`,
+`run_id`, `run_attempt`, `started_at`, `finished_at` and `exit_code`. They never include the
+token, its claims or the deploy's output.
+
+| HTTP | `status` | Meaning |
 |---|---|---|
-| Workflow | Only `deploy-aws` uses the `spendwise-deploy` label, only for a push to `main` of this repository after **All checks passed**. It has no `uses:` steps (no checkout, no third-party actions) and no `GITHUB_TOKEN` (`permissions: {}`). | `.github/workflows/ci.yml` |
-| Job hook | `ACTIONS_RUNNER_HOOK_JOB_STARTED` runs before every job on this runner. Unless the event is `push`, the ref `refs/heads/main`, the repository this one, the workflow `ci.yml` on `main` and the job `deploy-aws`, the job fails before any step runs. This stops a pull request that edits the workflow to target the runner. | `runner/job-started.sh` |
-| Linux user | The runner service runs as `spendwise-runner`: a system user with no password, `/sbin/nologin`, and no `docker`, `wheel` or `adm` group (membership in `docker` would be root-equivalent). | `runner/install-runner.sh` |
-| sudo | Exactly one rule: `/usr/local/sbin/spendwise-deploy-sha` with one argument matching `^[0-9a-f]{40}$`, checked by sudo itself. No shells, no other commands, no `ALL`. | `runner/spendwise-runner.sudoers` |
-| Wrapper | Root-owned. Rejects anything but exactly one 40-character lowercase SHA (exit 64). Refuses a SHA that isn't the current head of `main` (exit 65), so it can't deploy a branch, tag or pull request commit. Then runs `spendwise-deploy` with it. | `runner/spendwise-deploy-sha` |
-| Network | An `iptables` owner-match rule rejects the runner user's traffic to the instance metadata service (169.254.169.254), so it can't obtain the instance role's credentials. Root, Docker and the SSM agent are unaffected. | `runner/spendwise-runner-no-imds.service` |
-| Installer checks | Before it starts the runner, the installer verifies the isolation below and **refuses to start the runner if any check fails**. `install-runner.sh --verify` repeats the checks at any time. | `runner/install-runner.sh` |
+| 202 | `running` | Deploy started, or still running. |
+| 200 | `success` | Deployed, `spendwise-deploy` reported this SHA, and `/api/health/ready` answered. |
+| 200 | `deploy_failed` | `spendwise-deploy` failed, or didn't report this SHA. |
+| 200 | `health_failed` | Deployed, but `/api/health/ready` didn't answer 200. |
+| 200 | `timeout` | Stopped after 50 minutes. |
+| 200 | `superseded` | Not the head of `main` any more; the newer run deploys (the job ends without error). |
+| 200 | `busy` / `interrupted` | The host lock was held, or the gateway restarted mid-deploy. |
+| 400 | `invalid_sha` / `invalid_request` | Malformed body. |
+| 401 | `unauthorized` | Any token problem. The reason is only in the gateway's journal. |
+| 405 / 404 / 411 / 413 / 415 | … | Not `POST /_deploy`, no length, body over 1 KiB (Caddy: over 4 KB), not JSON. |
+| 409 | `replay_rejected` / `busy` | Token already used / another run's deploy is running. |
+| 503 | `unavailable` | GitHub's keys couldn't be fetched (fails closed). |
 
-The installer enforces and checks all of the following:
+The job fails on anything but `success` (or `superseded`). It retries only transport failures,
+502, 503 and 504, at most 15 times in a row; Caddy itself may restart during a deploy.
+
+#### Network isolation
+
+- **No new port.** The gateway listens only on a Unix socket,
+  `/run/spendwise-deploy-gateway/gateway.sock`, never on TCP. The security group still allows
+  only 80 and 443, and Compose still publishes only Caddy's 80 and 443.
+- **Caddy is the only way in.** `compose.aws.yaml` bind-mounts the socket's directory into the
+  Caddy container, read-only (connecting to a socket needs no write access to the mount). The
+  directory is the gateway's, mode 0750, created at every boot by a `tmpfiles.d` entry before
+  Docker starts. Only the gateway and root can use it; Caddy runs as root in its container.
+- **The Caddy route** (`deploy/aws/Caddyfile`):
+  - only exactly `/_deploy` is forwarded, and only `POST`, with a body of at most 4 KB;
+  - another method gets `405` with `Allow: POST`, and anything under `/_deploy/` gets `404`;
+  - none of it ever reaches the app, and every other path is routed as before;
+  - upstream timeouts are 5 s to connect and 60 s for the answer;
+  - there's no access log, and Caddy never logs `Authorization` headers anyway.
+- **Why not a TCP port:** a deploy service on `0.0.0.0:<port>` would be one security group
+  mistake away from the internet. A private Docker-bridge listener would need its own firewall
+  rules. The Unix socket needs neither.
+- Caddy matches paths case-insensitively, so `/_DEPLOY` reaches the gateway too. The gateway
+  answers anything but exactly `/_deploy` with `404`.
+
+#### The gateway's privileges
+
+The gateway runs as `spendwise-deploy-gateway`, a systemd service (`spendwise-deploy-gateway`).
+Its one privileged operation is `sudo -n /usr/local/sbin/spendwise-deploy-sha <sha>`. The
+installer enforces each item below. It refuses to start the gateway unless every check passes,
+and `install-gateway.sh --verify` repeats the checks at any time:
 
 | Item | Required state |
 |---|---|
-| `/usr/local/sbin/spendwise-deploy-sha` (wrapper) | `root:root`, mode 0755. Neither the file nor its directory is writable by `spendwise-runner`. |
-| `/usr/local/libexec/spendwise-runner-job-started` (hook) | `root:root`, mode 0755. Neither the file nor its directory is writable by `spendwise-runner`. |
-| `/etc/sudoers.d/spendwise-runner` | `root:root`, mode 0440. Validated with `visudo -cf` before it's installed, and again in place. |
-| Groups | `spendwise-runner` is not in `docker`, `wheel` or `adm` (removed if it was). |
-| sudo | `spendwise-runner` can't run any other command with sudo. |
-| `/srv/spendwise/secrets/spendwise.env` | Not readable by `spendwise-runner`: root-only, mode 0600, in a mode 0700 directory. |
-| `/var/run/docker.sock` | Not readable or writable by `spendwise-runner`: `root:docker` 0660, and the user isn't in `docker`. Docker access would be root access. |
-| Instance metadata | The `iptables` rule for `spendwise-runner` is in place. |
+| User | Not root; no password; shell `/sbin/nologin`; no home directory. |
+| Groups | Not in `docker`, `wheel` or `adm` (removed if it was). `docker` would be root-equivalent. |
+| Service | `User=spendwise-deploy-gateway`; requires the metadata block below. |
+| sudo | Exactly one rule (`/etc/sudoers.d/spendwise-deploy-gateway`, `root:root` 0440, `visudo -cf` before installing and in place): the wrapper with one argument matching `^[0-9a-f]{40}$`, checked by sudo itself. No shells, no `ALL`, no other command or argument. No other sudo rule may mention the wrapper. |
+| Wrapper | `/usr/local/sbin/spendwise-deploy-sha`, root-owned. It checks the SHA again, takes the deploy lock, refuses anything but the head of `main`, and runs `spendwise-deploy <sha>` with a time limit and a normal umask. |
+| Root-owned files | The program, its virtual environment, its settings, the units, the `tmpfiles.d` entry, the wrapper, the sudo rule, `/usr/local/bin/spendwise-deploy` and `/etc/spendwise/deploy.env` (which the wrapper reads as root) are all `root:root` and not group- or world-writable. The gateway user can't write any of them, or their directories. |
+| Secrets | Can't read `/srv/spendwise/secrets/spendwise.env`. |
+| Docker | Can't read or write `/var/run/docker.sock`, `/run/docker.sock` or `/run/containerd/containerd.sock`. |
+| Instance metadata | An `iptables` owner-match rule rejects its traffic to 169.254.169.254, so it can't get the instance role's credentials. Root, and so `spendwise-deploy`, isn't affected. |
+| Socket directory | `/run/spendwise-deploy-gateway`, owned by the gateway, mode 0750. |
 
-The Compose files and the checkout in `/opt/spendwise/src` are root-owned too, and the runner user
-can't change them.
+The service doesn't use `NoNewPrivileges=` or systemd's file-system sandboxing. The first would
+stop sudo, and the second would also confine the root deploy, which runs inside the same unit.
+The checks above provide the user's isolation instead.
 
-#### Public repository safety
+#### Threat model
 
-GitHub recommends against self-hosted runners for public repositories: a pull request from a
-fork could run code on them, and they aren't reset between jobs like GitHub-hosted runners.
-This runner exists only because the AWS Free Tier Project SCP rules out Mode A. It relies on the
-following controls; keep them all:
+| Threat | What stops it |
+|---|---|
+| Anyone on the internet calls `/_deploy` | Without a valid GitHub-signed token for this repository's `main` push, the answer is `401` and nothing runs. Unknown key IDs refresh GitHub's keys at most once a minute. |
+| A pull request, including one from a fork, edits the workflow to get a token | Its token says `pull_request`, another `ref` and `sub`, and for a fork another repository ID: refused. |
+| Another repository, workflow or job asks for audience `spendwise-deploy` | Repository, IDs, `sub` and `workflow_ref` must all match exactly. |
+| A runner someone else controls | `runner_environment` must be `github-hosted`. |
+| A token is replayed, or sent twice at once | Each `jti` works once (SQLite primary key). |
+| A token is stolen from a run | It's masked in logs and passed on stdin only. It expires within minutes, works once, and only for that run's own commit, which must still be the head of `main`. The workflow uses each token right away. |
+| Rolling production back to an old commit | The `sha` claim must equal the request, and the wrapper deploys only the head of `main`. |
+| Code execution as the gateway user | It can only run the wrapper for the head of `main`. No Docker, no secrets, no instance metadata, no other sudo, no writable program or configuration file. |
+| GitHub's key documents are tampered with | Verified HTTPS, no redirects, the discovery issuer must match, and `jwks_uri` must be on the issuer's host. Any failure fails closed. |
+| Floods and oversized requests | Bodies over 4 KB are dropped by Caddy (and over 1 KiB by the gateway); connections time out after 15 s; one deploy at a time. |
 
-- Only the `deploy-aws` job, on a push to `main`, can use this runner. `pull_request` jobs and
-  every CI job run on GitHub-hosted runners.
-- **Untrusted pull request code must never execute on the production runner.** The workflow
-  conditions keep the job off pull requests. The job hook enforces the same rule on the runner,
-  even for a pull request that changes the workflow file.
-- **Require a pull request and the "All checks passed" check for `main`** (branch protection),
-  so a workflow change reaches `main` only after review.
-- **Require approval before running workflows from fork pull requests** (repository Settings,
-  Actions, General: require approval for all external contributors).
-- Remaining risk: anyone who can push to `main` can change what `deploy-aws` runs, as
-  `spendwise-runner`. That's still not root (sudo allows only the wrapper) and has no AWS
-  credentials. Branch protection is what closes it.
+What remains:
+- **Anyone who can push to `main` decides what gets deployed.** That is the intended trust;
+  branch protection is what limits it.
+- **GitHub is trusted** as the token issuer.
+- **The gateway is reachable from the internet** through Caddy. That's the price of running no
+  inbound tunnel, and it's why every request is authenticated.
+- **Restarting the gateway stops a running deploy.** The installer refuses to restart it while
+  the deploy lock is held.
 
-#### Setting it up (once)
+#### Installing it on the existing instance (once)
 
-The runner is installed from a Session Manager shell on the instance (`SessionCommand` output).
-Nothing here needs a stack update: the default template creates no deploy resources.
+Nothing here replaces the instance, opens a port or needs a stack update. The current
+production app keeps running throughout.
 
-1. **GitHub settings.** Apply both settings from the [GitHub settings](#github-settings-for-both-modes)
-   list below.
-2. **Put the runner files on the instance.** After the change that adds `deploy/aws/runner/` is
-   merged, deploy it once by hand. The installer runs from the root-owned checkout:
+1. **Merge this change with `AWS_DEPLOY_MODE` unset.** It is unset now (`gh variable list`
+   shows no variables), so the merge deploys nothing. Apply the
+   [GitHub settings](#github-settings-for-both-modes).
+2. **Open a shell on the instance** (`SessionCommand` output) and
+   [clean up the abandoned runner](#cleaning-up-the-abandoned-runner).
+3. **Deploy the merged commit by hand.** This gives Caddy the `/_deploy` route and the socket
+   mount, and puts the gateway's files in the root-owned checkout:
 
    ```bash
-   sudo spendwise-deploy <commit SHA on main>        # or: sudo spendwise-deploy main
+   sudo spendwise-deploy <commit SHA of the merge on main>
    ```
 
-3. **Get a registration token on your machine.** It's valid for one hour, works for one
-   registration, and is never stored:
+4. **Install the gateway** from that checkout. It needs no token or secret:
 
    ```bash
-   gh api -X POST repos/allfocusSS/SpendWise/actions/runners/registration-token --jq .token
-   ```
-
-4. **Run the installer on the instance** and paste the token when asked (it isn't echoed):
-
-   ```bash
-   sudo bash /opt/spendwise/src/deploy/aws/runner/install-runner.sh
+   sudo bash /opt/spendwise/src/deploy/aws/gateway/install-gateway.sh
    ```
 
    It does the following:
-   - installs `libicu` and `iptables-nft`;
-   - creates `spendwise-runner`;
-   - installs the wrapper, the job hook, the sudo rule (after `visudo -cf` accepts it) and the
-     metadata block;
-   - downloads runner 2.338.2 and checks its SHA-256;
-   - registers the runner as `spendwise-ec2` with the label `spendwise-deploy` (plus the
-     default labels `self-hosted`, `Linux` and `X64`);
-   - checks the runner user's isolation (the table above), and stops without starting the
-     runner if any check fails;
-   - starts it as a systemd service running as `spendwise-runner`;
-   - prints `sudo -l` for that user.
+   - installs `python3.13` and `iptables-nft`;
+   - creates `spendwise-deploy-gateway`;
+   - installs the program and its hash-pinned packages, root-owned;
+   - writes `/etc/spendwise/deploy-gateway.env`, adding the health URL from `deploy.env`;
+   - installs the wrapper and the sudo rule (after `visudo -cf`), the metadata block, the
+     socket directory and the service;
+   - checks the isolation (the table above), and won't start the gateway if any check fails;
+   - checks the settings and GitHub's keys as the gateway user (`--check`);
+   - starts the gateway;
+   - prints `sudo -l` for its user.
 
-   The token is used once and isn't written anywhere. The runner keeps only its own
-   registration credentials, in `/opt/actions-runner`. Those identify this runner to GitHub;
-   they are not a GitHub token.
-5. **Set the repository variables** (variables, not secrets: nothing here is secret):
+5. **Check it:**
 
    ```bash
-   gh variable set AWS_DEPLOY_MODE --body self-hosted-runner
-   gh variable set PRODUCTION_URL  --body https://54.79.77.189.nip.io   # SiteUrl output, no trailing slash
-   gh api repos/allfocusSS/SpendWise/actions/runners --jq '.runners[] | [.name, .status, (.labels | map(.name) | join(","))]'
+   sudo bash /opt/spendwise/src/deploy/aws/gateway/install-gateway.sh --verify   # every line "ok"
+   curl -s -X POST https://54.79.77.189.nip.io/_deploy -H 'Content-Type: application/json' \
+     --data '{"sha":"0000000000000000000000000000000000000000","run_id":"1","run_attempt":"1"}'
+   # {"status": "unauthorized"}: Caddy reached the gateway, which refused the missing token
+   curl -s -o /dev/null -w '%{http_code}\n' https://54.79.77.189.nip.io/_deploy   # 405
    ```
 
-The runner updates itself when GitHub releases a new version. Re-running the installer is safe;
-it reinstalls the wrapper, hook, sudo rule and metadata block.
+6. **Turn deploys on** (repository variables, not secrets: nothing here is secret):
 
-#### Removing the runner
+   ```bash
+   gh variable set AWS_DEPLOY_MODE --body oidc-gateway
+   gh variable set PRODUCTION_URL  --body https://54.79.77.189.nip.io   # SiteUrl output, no trailing slash
+   ```
+
+7. **The first real deploy** is the next push to `main`. Watch the job, and on the instance
+   `sudo journalctl -fu spendwise-deploy-gateway`. Only after it succeeds is Mode B verified in
+   production.
+
+Re-running the installer is safe (it reinstalls every file). It refuses to restart the gateway
+while a deploy holds the lock.
+
+#### A replacement instance
+
+A new stack's first boot deploys the app as before. It doesn't install the gateway: changing
+the instance's first-boot script would make CloudFormation stop and start the running instance.
+After the stack is created, run step 4 (and 5) in a Session Manager shell. Then update
+`PRODUCTION_URL` if the address changed. Nothing changes on GitHub's side: the gateway trusts
+the same repository IDs and needs no registration.
+
+#### Cleaning up the abandoned runner
+
+The failed runner bootstrap may have left some of these on the instance. Remove only these.
+Don't touch `/opt/spendwise/src`, the containers, `/srv/spendwise` (database, certificates,
+password), Caddy, `/usr/local/bin/spendwise-deploy` or `/usr/local/sbin/spendwise-deploy-sha`:
+the gateway reuses the wrapper, and its installer replaces it with the new version.
 
 ```bash
-# On your machine: pause deploys, then get a one-hour removal token
-gh variable delete AWS_DEPLOY_MODE
-gh api -X POST repos/allfocusSS/SpendWise/actions/runners/remove-token --jq .token
+# On the instance (Session Manager). Each command is safe if the item doesn't exist.
+ls -ld /opt/actions-runner /etc/sudoers.d/spendwise-runner /usr/local/libexec/spendwise-runner-job-started \
+  /etc/systemd/system/spendwise-runner-no-imds.service /etc/systemd/system/actions.runner.* 2> /dev/null
+id spendwise-runner
 
-# On the instance (Session Manager)
-cd /opt/actions-runner
-sudo ./svc.sh stop && sudo ./svc.sh uninstall
-sudo runuser -u spendwise-runner -- env HOME=/home/spendwise-runner ./config.sh remove --token <removal token>
-sudo systemctl disable --now spendwise-runner-no-imds.service
-sudo rm -f /etc/systemd/system/spendwise-runner-no-imds.service /etc/sudoers.d/spendwise-runner \
-  /usr/local/sbin/spendwise-deploy-sha /usr/local/libexec/spendwise-runner-job-started
-sudo rm -rf /opt/actions-runner /etc/systemd/system/actions.runner.*.service.d
-sudo userdel -r spendwise-runner
+# The runner service, if `svc.sh install` ever ran (registration failed, so normally it didn't)
+if [ -f /opt/actions-runner/.service ]; then
+  (cd /opt/actions-runner && sudo ./svc.sh stop; sudo ./svc.sh uninstall)
+fi
+sudo rm -rf /etc/systemd/system/actions.runner.*.service.d
+
+# The runner user's metadata block: stop it while the user still exists (its stop command
+# names the user), then remove it
+sudo systemctl disable --now spendwise-runner-no-imds.service 2> /dev/null || true
+sudo rm -f /etc/systemd/system/spendwise-runner-no-imds.service
 sudo systemctl daemon-reload
+
+# The runner's sudo rule and job hook (not the wrapper: the gateway reuses it)
+sudo rm -f /etc/sudoers.d/spendwise-runner /usr/local/libexec/spendwise-runner-job-started
+sudo visudo -c
+
+# The runner's user and its files
+sudo pkill -u spendwise-runner 2> /dev/null || true
+id spendwise-runner > /dev/null 2>&1 && sudo userdel -r spendwise-runner
+sudo rm -rf /opt/actions-runner
+
+# Nothing left over: no rule for the old user, and no leftover runner on GitHub
+sudo iptables -S OUTPUT | grep -c 169.254.169.254         # 0 before the gateway is installed
+gh api repos/allfocusSS/SpendWise/actions/runners --jq '.total_count'   # on your machine: 0
 ```
 
-If the instance is already gone, remove the runner on GitHub instead (Settings, Actions, Runners,
-or `gh api -X DELETE repos/allfocusSS/SpendWise/actions/runners/<id>`).
+Registration never succeeded, so GitHub should list no runner. If it lists `spendwise-ec2`,
+delete it in Settings, Actions, Runners. The gateway's `--verify` fails while any other sudo
+rule (such as the old runner's) still mentions the wrapper.
 
-### Mode A: GitHub OIDC and SSM (standard AWS accounts)
+#### Troubleshooting
 
-For an account without the Free Tier Project SCP. The `deploy-aws-oidc` job gets one-hour
-credentials from GitHub's OIDC token and runs the deploy through SSM Run Command. There's no
-runner on the instance.
+| Symptom | Where to look |
+|---|---|
+| The job reports `unauthorized` | `sudo journalctl -u spendwise-deploy-gateway` names the failing check (e.g. `claim workflow_ref does not match`). The repository was renamed or transferred (new IDs), `ci.yml` was renamed, or the OIDC subject customization changed. Compare with `deploy-gateway.env` and re-run the installer after updating it. |
+| `unavailable` (503) | The gateway can't fetch GitHub's keys. Run the installer's `--check` line by hand, and check outbound HTTPS. |
+| No answer, or 502 from Caddy, for a long time | `systemctl status spendwise-deploy-gateway`; `sudo ls -la /run/spendwise-deploy-gateway` (socket present?). If Caddy started before the directory existed, recreate it: `$c up -d --force-recreate caddy` (see [Operating it](#operating-it)). |
+| `busy` | A deploy holds the lock: `sudo flock -n /run/spendwise-deploy.lock true || echo held`. Wait for it, then re-run the job. |
+| `deploy_failed`, `timeout` or `health_failed` | `sudo ls -t /var/lib/spendwise-deploy-gateway/logs/` and the newest `deploy-<run>-<attempt>.log`; `$c ps`; `$c logs --tail 100 app`. The health check is made from the instance to its own public URL. |
+| `interrupted` | The gateway restarted mid-deploy. Re-run the job: a new attempt is a new deploy. |
+| `replay_rejected` | A token was sent twice, which the workflow never does. Check for a modified workflow. |
+
+#### Removing the gateway
+
+```bash
+gh variable delete AWS_DEPLOY_MODE                       # on your machine: pause deploys first
+# On the instance
+sudo systemctl disable --now spendwise-deploy-gateway.service spendwise-deploy-gateway-no-imds.service
+sudo rm -f /etc/systemd/system/spendwise-deploy-gateway{,-no-imds}.service \
+  /etc/tmpfiles.d/spendwise-deploy-gateway.conf /etc/sudoers.d/spendwise-deploy-gateway \
+  /etc/spendwise/deploy-gateway.env
+sudo rm -rf /usr/local/lib/spendwise-deploy-gateway /var/lib/spendwise-deploy-gateway /run/spendwise-deploy-gateway
+sudo systemctl daemon-reload && sudo visudo -c
+sudo userdel spendwise-deploy-gateway
+```
+
+Caddy then answers `502` on `/_deploy` until a deploy without the route ships. The rest of the
+site is unaffected.
+
+### Mode A: GitHub OIDC and SSM (AWS accounts that permit federation)
+
+For an account without the Free Tier Project SCP. This is the standard production
+recommendation: nothing on the instance accepts requests from GitHub. The `deploy-aws-oidc` job
+gets one-hour credentials from GitHub's OIDC token and runs the deploy through SSM Run Command.
 
 ```
 push to main
@@ -489,7 +709,7 @@ An access key in GitHub Secrets would be long-lived: it works from anywhere unti
 rotates it, and any workflow that can read the secret can use it. With OIDC, GitHub signs a token
 for each job that describes which repository, branch and event it runs for. AWS STS exchanges it
 for credentials that expire after one hour, and only if the role's trust policy accepts it. Only
-the `deploy-aws-oidc` job gets `id-token: write`. Every other job keeps the read-only token.
+the two deploy jobs get `id-token: write`. Every other job keeps the read-only token.
 
 #### Who can assume the role
 
@@ -589,28 +809,35 @@ IAM or Session Manager permissions, no SSH, no `AdministratorAccess` and no mana
 
 | Variable | Mode | Value |
 |---|---|---|
-| `AWS_DEPLOY_MODE` | both | `self-hosted-runner` or `oidc-ssm`; unset disables deploys |
-| `PRODUCTION_URL` | both | `SiteUrl` output, no trailing slash, e.g. `https://54.79.77.189.nip.io` |
+| `AWS_DEPLOY_MODE` | both | `oidc-gateway` (this account) or `oidc-ssm`; unset disables deploys |
+| `PRODUCTION_URL` | both | `SiteUrl` output, no trailing slash, e.g. `https://54.79.77.189.nip.io`. In Mode B the deploy endpoint is derived from it: `<PRODUCTION_URL>/_deploy` |
 | `AWS_REGION` | A | the stack's region |
 | `AWS_DEPLOY_ROLE_ARN` | A | output `GitHubDeployRoleArn` |
 | `AWS_INSTANCE_ID` | A | output `InstanceId` |
 | `AWS_DEPLOY_DOCUMENT` | A | output `DeployDocumentName` |
 
+Mode B needs no secret and no other variable. Its OIDC audience, `spendwise-deploy`, is fixed in
+the workflow and in `deploy/aws/gateway/deploy-gateway.env` (a test checks they match), because
+changing it on one side only would just break deploys.
+
 ### How a deploy runs (both modes)
 
 - **Trigger:** a push to `main` (including a merged pull request), after every CI job passed.
   Pull requests, other branches and manual runs never deploy.
-- **The tested commit only:** the job deploys `github.sha`, never `main`. It then checks that
-  `spendwise-deploy` reported deploying that exact SHA.
+- **The tested commit only:** the job deploys `github.sha`, never `main`. `spendwise-deploy` must
+  report deploying that exact SHA (checked by the gateway in Mode B, by the job in Mode A).
 - **Newest commit wins:** if `main` has moved on by the time CI finishes, the job skips (with a
   notice) and the newer run deploys instead. In Mode B the wrapper refuses anything but the head
   of `main` as well. Deploys never overlap and are never cancelled half-way
-  (`concurrency: deploy-aws-production`).
-- **Bounded:** Mode B's deploy step times out after 50 minutes. Mode A polls SSM every 15
-  seconds for at most about 53 minutes. Health checks retry a fixed number of times.
+  (`concurrency: deploy-aws-production`, plus the gateway's and the host's locks in Mode B).
+- **Bounded:** in Mode B the wrapper stops a deploy after 50 minutes and the job polls for at
+  most 55. Mode A polls SSM every 15 seconds for at most about 53 minutes. Health checks retry a
+  fixed number of times.
 - **Failures:** the job fails if the deploy fails (the stack didn't become healthy), if it runs
-  out of time, or if `/api/health`, `/api/health/ready` or `/` doesn't answer afterwards. The
-  instance's output is in the job log. In Mode A, SSM returns at most 24,000 characters of it.
+  out of time, or if `/api/health`, `/api/health/ready` or `/` doesn't answer afterwards. In
+  Mode B only the status reaches the job log; the instance's output stays on the instance
+  (`/var/lib/spendwise-deploy-gateway/logs/`). In Mode A, SSM returns at most 24,000 characters
+  of it to the job log.
 - A failed deploy leaves the previous containers running, unless the new ones had already
   replaced them (`docker compose up --wait` then reports them unhealthy).
 
@@ -622,10 +849,11 @@ gh run watch                                   # or: gh run view <run id> --log 
 curl -fsS https://54.79.77.189.nip.io/api/health/ready
 
 # Mode B, on the instance (Session Manager)
-systemctl status 'actions.runner.*' spendwise-runner-no-imds --no-pager
-sudo -l -U spendwise-runner                    # only the wrapper, with a SHA
-sudo bash /opt/spendwise/src/deploy/aws/runner/install-runner.sh --verify   # every check "ok"
-sudo journalctl -u 'actions.runner.*' --since today   # includes refusals by the job hook
+systemctl status spendwise-deploy-gateway spendwise-deploy-gateway-no-imds --no-pager
+sudo -l -U spendwise-deploy-gateway            # only the wrapper, with a SHA
+sudo bash /opt/spendwise/src/deploy/aws/gateway/install-gateway.sh --verify   # every check "ok"
+sudo journalctl -u spendwise-deploy-gateway --since today   # deploys, and why requests were refused
+sudo python3 -c 'import sqlite3; [print(*r) for r in sqlite3.connect("/var/lib/spendwise-deploy-gateway/gateway.sqlite3").execute("SELECT run_id, run_attempt, sha, status, exit_code FROM deployments ORDER BY started_at DESC LIMIT 5")]'
 
 # Mode A, with your own credentials (and `out` from Mode A's step 3)
 aws ssm list-commands --instance-id "$(out InstanceId)" --max-items 5 \
@@ -640,11 +868,11 @@ aws cloudtrail lookup-events --max-results 5 \
   deploys only if that commit is still the head of `main`.
 - **Roll back:** revert the bad commit on `main` (`git revert`, pull request, merge). CI tests the
   revert and the deploy job ships it, like any other change.
-- **Emergency rollback without CI:** open a Session Manager shell and run
-  `sudo spendwise-deploy <older sha>` as an administrator. The runner can't do this, because its
-  wrapper deploys only the head of `main`. In Mode A you can also send the deploy document for
-  that SHA with your own credentials. The next push to `main` deploys `main` again, so follow it
-  with a revert.
+- **Emergency rollback without CI:** open a Session Manager shell and, as an administrator, run
+  `sudo flock -n /run/spendwise-deploy.lock spendwise-deploy <older sha>` (the lock keeps it from
+  overlapping an automatic deploy). The gateway can't do this, because its wrapper deploys only
+  the head of `main`. In Mode A you can also send the deploy document for that SHA with your own
+  credentials. The next push to `main` deploys `main` again, so follow it with a revert.
 - **Pause automatic deploys:** `gh variable delete AWS_DEPLOY_MODE` (both jobs are then skipped).
   Set it again to resume.
 
@@ -670,7 +898,7 @@ Run the `describe-volumes` command after a failed first create too: each attempt
 volume. Delete the deploy key parameter and the budget stack when you no longer need them.
 
 **Continuous deployment.** Delete the GitHub variables **before** the stack, so pushes to `main`
-skip the deploy instead of waiting for a runner, or a role, that no longer exists:
+skip the deploy instead of failing against a gateway, or a role, that no longer exists:
 
 ```bash
 for v in AWS_DEPLOY_MODE PRODUCTION_URL AWS_DEPLOY_ROLE_ARN AWS_INSTANCE_ID AWS_DEPLOY_DOCUMENT AWS_REGION; do
@@ -678,8 +906,8 @@ for v in AWS_DEPLOY_MODE PRODUCTION_URL AWS_DEPLOY_ROLE_ARN AWS_INSTANCE_ID AWS_
 done
 ```
 
-In Mode B, also remove the runner from GitHub (see [Removing the runner](#removing-the-runner)).
-Deleting the instance doesn't unregister it, so GitHub keeps listing it as offline.
+In Mode B there's nothing to remove on GitHub's or AWS's side: the gateway lives only on the
+instance, and nothing was registered anywhere.
 
 In Mode A, deleting the stack deletes the deploy role and the deploy document. It also deletes
 the GitHub OIDC provider **if this stack created it** (`ExistingGitHubOidcProviderArn` empty). Any other
@@ -694,12 +922,17 @@ Nothing here needs AWS credentials:
 ```bash
 # CloudFormation schema and best practices
 uvx cfn-lint deploy/aws/spendwise-stack.yaml deploy/aws/budget.yaml
-# Free-tier and security guardrails, the deploy runner's files, and the deploy workflow
-cd backend && uv run pytest tests/unit/test_aws_templates.py tests/unit/test_aws_runner.py \
-  tests/unit/test_ci_workflow.py && cd ..
-# Workflow syntax and its shell scripts (actionlint includes shellcheck; the runner's label is
-# declared in .github/actionlint.yaml)
+# Free-tier and security guardrails, the deploy gateway and its host files, and the workflow
+cd backend && uv run pytest tests/unit/test_aws_templates.py tests/unit/test_deploy_gateway.py \
+  tests/unit/test_aws_gateway_host.py tests/unit/test_ci_workflow.py && cd ..
+# Workflow syntax and its shell scripts (actionlint includes shellcheck)
 docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:latest
+# The gateway's shell scripts
+docker run --rm -v "$PWD":/mnt -w /mnt koalaman/shellcheck:stable \
+  deploy/aws/gateway/install-gateway.sh deploy/aws/gateway/spendwise-deploy-sha
+# The Caddyfile
+docker run --rm -e SPENDWISE_SITE_ADDRESS=example.com -v "$PWD/deploy/aws/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  caddy:2.11 caddy validate --config /etc/caddy/Caddyfile
 ```
 
 The tests (part of the normal backend suite and CI) check, among other things:
@@ -717,17 +950,28 @@ The tests (part of the normal backend suite and CI) check, among other things:
 - Mode A's deploy role: OIDC audience, a trust that matches only this repository's `main`
   (immutable subject), `AssumeRoleWithWebIdentity` only, `SendCommand` scoped to the deploy
   document and this instance, no administrator or wildcard permissions, and the outputs;
-- Mode B's runner files:
-  - the wrapper rejects anything but one 40-character lowercase SHA, and deploys only the head
-    of `main`;
+- that Compose publishes only Caddy, and that Caddy reaches the gateway only for `POST /_deploy`,
+  through the read-only socket mount;
+- Mode B's gateway, with locally generated RSA keys and a fake issuer (never GitHub's):
+  - a valid token is accepted; wrong key, unknown `kid`, bad signature, `alg: none`, HMAC and
+    other algorithms, wrong issuer or audience, expired, not yet valid or implausible `iat`, and
+    every wrong claim (subject, repository, IDs, branch, tag, pull request, self-hosted runner,
+    workflow, SHA, run) are refused;
+  - key rotation and refresh limits, and failing closed when discovery or keys are unusable;
+  - each `jti` works once, also for simultaneous requests and after a restart;
+  - one deploy at a time; the wrapper's results, time limit, bounded and redacted output, and
+    the health check; that tokens never reach the logs;
+  - the HTTP side: `POST /_deploy` only, the size limit, the socket's permissions;
+- the gateway's host files:
+  - the wrapper accepts only one 40-character lowercase SHA, takes the lock, deploys only the
+    head of `main`, and resets the umask;
   - the sudo rule allows only the wrapper, with a SHA;
-  - the job hook refuses pull requests, other refs, workflows, jobs and repositories, and fails
-    closed;
-  - the installer gives the runner user no route to root and keeps no GitHub token;
-  - the metadata block is installed;
+  - the installer's isolation checks run before the gateway starts;
+  - packages are hash-pinned, and the units run unprivileged behind the metadata block;
 - the workflow:
-  - only `deploy-aws` uses the self-hosted runner, and every CI job is GitHub-hosted;
+  - every job is GitHub-hosted, and no self-hosted runner remains;
   - deploys only on a push to `main` after "All checks passed", never for pull requests;
-  - the exact commit SHA, the narrow sudo call only, and no AWS keys or secrets;
-  - `id-token: write` only on the OIDC job;
-  - bounded steps and the health checks.
+  - the gateway job gets only `id-token: write`, requests its own token with the gateway's
+    audience, masks it and never puts it on a command line;
+  - the exact commit SHA and run, and no AWS keys, tokens or secrets;
+  - bounded polling and the health checks.

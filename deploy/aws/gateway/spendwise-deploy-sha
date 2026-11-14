@@ -1,0 +1,47 @@
+#!/bin/bash
+# Installed root-owned as /usr/local/sbin/spendwise-deploy-sha by install-gateway.sh. The only
+# command the deploy gateway's user (spendwise-deploy-gateway) may run as root, through sudo:
+#
+#   sudo -n /usr/local/sbin/spendwise-deploy-sha <40-character lowercase commit SHA>
+#
+# It deploys that commit with spendwise-deploy, only if it is the current head of main, one
+# deploy at a time on this host, and for at most 50 minutes. A manual deploy can use it too, to
+# take the same lock. Exit codes the gateway reports:
+#   64  the argument is not one 40-character lowercase SHA
+#   65  it is not the head of main (a newer commit deploys instead)
+#   75  another deploy is running
+#   124 spendwise-deploy ran out of time (137 if it had to be killed)
+#   any other non-zero code is spendwise-deploy's own failure.
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+export HOME=/root
+# sudo keeps the gateway's stricter umask; the checkout and the image need the normal one.
+umask 022
+
+if [ "$#" -ne 1 ] || ! [[ $1 =~ ^[0-9a-f]{40}$ ]]; then
+  echo "usage: spendwise-deploy-sha <40-character lowercase commit SHA>" >&2
+  exit 64
+fi
+sha=$1
+
+# One deploy at a time. The lock is in /run (root-only), held until spendwise-deploy and
+# everything it started have exited.
+exec 9> /run/spendwise-deploy.lock
+if ! flock -n 9; then
+  echo "Another deploy is running." >&2
+  exit 75
+fi
+
+# GITHUB_REPOSITORY (owner/name), written at first boot; root-owned.
+# shellcheck source=/dev/null
+. /etc/spendwise/deploy.env
+if ! head=$(timeout 60 git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1); then
+  echo "Could not read the head of main from GitHub." >&2
+  exit 1
+fi
+if [ "$head" != "$sha" ]; then
+  echo "Refusing to deploy $sha: it is not the head of main (${head:-unknown})." >&2
+  exit 65
+fi
+
+exec timeout --kill-after=60 3000 /usr/local/bin/spendwise-deploy "$sha"

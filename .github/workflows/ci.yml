@@ -6,11 +6,11 @@ name: CI
 #
 # After every job passed on a push to main, that exact commit is deployed to the AWS instance
 # (deploy/aws/README.md, "Automatic deploys"). The repository variable AWS_DEPLOY_MODE picks how:
-#   self-hosted-runner  deploy-aws runs on the instance's own runner (AWS Free Tier Projects,
-#                       whose SCP denies iam:*Provider*, so no OIDC provider can exist)
-#   oidc-ssm            deploy-aws-oidc uses GitHub OIDC credentials and SSM Run Command
-# Unset, nothing is deployed. Pull requests never deploy, and every other job runs on
-# GitHub-hosted runners.
+#   oidc-gateway  deploy-aws sends a GitHub OIDC token to the deploy gateway on the instance
+#                 (AWS Free Tier Projects, whose SCP denies iam:*Provider*, so AWS cannot trust
+#                 GitHub's OIDC tokens itself)
+#   oidc-ssm      deploy-aws-oidc uses GitHub OIDC credentials for AWS and SSM Run Command
+# Unset, nothing is deployed. Pull requests never deploy. Every job runs on GitHub-hosted runners.
 
 on:
   pull_request:
@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
 
 # Read-only token. Uploading artifacts and using the cache do not need extra permissions.
-# deploy-aws gets no token at all; deploy-aws-oidc alone also gets id-token: write.
+# The deploy jobs alone also get id-token: write (deploy-aws gets nothing else).
 permissions:
   contents: read
 
@@ -50,9 +50,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
       - name: Lint
-        run: uv run ruff check .
+        run: uv run ruff check . ../deploy/aws/gateway
       - name: Format check
-        run: uv run ruff format --check .
+        run: uv run ruff format --check . ../deploy/aws/gateway
       - name: Test
         run: uv run pytest
       - name: OpenAPI spec is up to date
@@ -233,20 +233,24 @@ jobs:
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
         run: exit 1
 
-  # Mode B (AWS Free Tier Project): deploy on the instance's own self-hosted runner. Only for a
-  # push to main of this repository, only after "All checks passed" succeeded. The runner's
-  # job-started hook refuses every other job, and its user may run exactly one root command:
-  # the deploy wrapper, for the current head of main (deploy/aws/runner/).
+  # Mode B (AWS Free Tier Project): GitHub OIDC to the SpendWise deploy gateway. Only for a push
+  # to main of this repository, only after "All checks passed" succeeded. The gateway on the
+  # instance (deploy/aws/gateway/) verifies the token's signature and claims (this repository by
+  # ID, main, push, ci.yml, a GitHub-hosted runner, this commit and run), accepts each token once,
+  # and deploys this exact commit. No AWS credentials, no secrets, nothing checked out.
   deploy-aws:
-    name: Deploy to AWS (self-hosted runner)
+    name: Deploy to AWS (OIDC deploy gateway)
     needs: [all-checks]
     if: >-
       github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-      github.repository == 'allfocusSS/SpendWise' && vars.AWS_DEPLOY_MODE == 'self-hosted-runner'
-    runs-on: [self-hosted, linux, spendwise-deploy]
-    timeout-minutes: 60
-    # No GITHUB_TOKEN on the production host: no step needs one, and nothing is checked out.
-    permissions: {}
+      github.repository == 'allfocusSS/SpendWise' && vars.AWS_DEPLOY_MODE == 'oidc-gateway'
+    runs-on: ubuntu-latest
+    # The deploy builds the image on a micro instance: up to 50 minutes (the wrapper's limit).
+    timeout-minutes: 65
+    permissions:
+      id-token: write # the OIDC token for the gateway; no other permission (contents: none)
+    # One deploy at a time and never cancelled half-way; a newer commit waits for it. The
+    # gateway and the instance's deploy lock enforce this too.
     concurrency:
       group: deploy-aws-production
       cancel-in-progress: false
@@ -254,6 +258,9 @@ jobs:
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
       # The commit this run tested, never "main": a later push cannot slip into this deploy.
       COMMIT_SHA: ${{ github.sha }}
+      # The gateway accepts tokens for this audience only (DEPLOY_GATEWAY_AUDIENCE in
+      # deploy/aws/gateway/deploy-gateway.env).
+      DEPLOY_AUDIENCE: spendwise-deploy
     steps:
       - name: Check the deployment settings
         run: |
@@ -265,9 +272,14 @@ jobs:
             echo "::error::Unexpected commit SHA: $COMMIT_SHA"
             exit 1
           fi
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "::error::No OIDC token available (the job needs permissions: id-token: write)"
+            exit 1
+          fi
 
-      # An older commit can finish CI after a newer one; the newer run deploys instead. (The
-      # wrapper refuses anything but the head of main as well.)
+      # Runs on main are not cancelled by newer ones, so an older commit can finish CI after a
+      # newer one. Deploying it would roll production back; the newer run deploys instead. (The
+      # instance refuses anything but the head of main as well.)
       - name: Skip if main has moved on
         id: latest
         run: |
@@ -279,21 +291,75 @@ jobs:
             echo "deploy=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Runs locally on the instance: fetch, build, `docker compose up --wait`; fails unless the
-      # stack becomes healthy. The step timeout bounds it.
-      - name: Deploy the commit
+      # The first request starts the deploy; later ones (same run) return its status. Every
+      # request has a fresh OIDC token, since the gateway accepts each token once. Tokens are
+      # masked, and passed to curl on stdin only (never on a command line, never in a file).
+      - name: Deploy the commit through the deploy gateway
+        id: deploy
         if: steps.latest.outputs.deploy == 'true'
-        timeout-minutes: 50
+        timeout-minutes: 60
         run: |
-          set -o pipefail
-          sudo -n /usr/local/sbin/spendwise-deploy-sha "$COMMIT_SHA" 2>&1 | tee "$RUNNER_TEMP/deploy.log"
-          if ! grep -q "^Deploying $COMMIT_SHA " "$RUNNER_TEMP/deploy.log"; then
-            echo "::error::spendwise-deploy did not report deploying $COMMIT_SHA"
-            exit 1
-          fi
+          body=$(jq -cn --arg sha "$COMMIT_SHA" --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{sha: $sha, run_id: $run_id, run_attempt: $run_attempt}')
+          answer="$RUNNER_TEMP/gateway.json"
+
+          # Sets $code (the HTTP status, 000 without an answer) and writes the answer to $answer.
+          # Not called in a command substitution, so the ::add-mask:: line reaches the runner.
+          request_deploy() {
+            local token
+            code=000
+            : > "$answer"
+            token=$(printf 'Authorization: bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" |
+              curl -fsS --max-time 20 --retry 3 --retry-all-errors -H @- \
+                "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$DEPLOY_AUDIENCE" | jq -r '.value // empty') || return 0
+            [ -n "$token" ] || return 0
+            echo "::add-mask::$token"
+            code=$(printf 'Authorization: Bearer %s\n' "$token" |
+              curl -sS --max-time 30 -H @- -H 'Content-Type: application/json' \
+                --data "$body" -o "$answer" -w '%{http_code}' "$PRODUCTION_URL/_deploy") || code=000
+          }
+
+          # Bounded: the wrapper stops spendwise-deploy after 50 minutes. Transient failures
+          # (Caddy restarting during the deploy, the gateway briefly unavailable) are retried
+          # at most 15 times in a row.
+          deadline=$((SECONDS + 3300))
+          transient=0
+          while :; do
+            request_deploy
+            status=$(jq -r '.status // empty' "$answer" 2> /dev/null || true)
+            echo "HTTP $code: ${status:-no answer} (${SECONDS}s)"
+            case "$code:$status" in
+              200:success)
+                echo "deployed=true" >> "$GITHUB_OUTPUT"
+                break ;;
+              200:superseded)
+                echo "::notice::$COMMIT_SHA is no longer the head of main; the newer run deploys it."
+                echo "deployed=false" >> "$GITHUB_OUTPUT"
+                exit 0 ;;
+              202:running)
+                transient=0 ;;
+              000:* | 502:* | 503:* | 504:*)
+                transient=$((transient + 1))
+                if [ "$transient" -ge 15 ]; then
+                  echo "::error::The deploy gateway did not answer ($PRODUCTION_URL/_deploy)"
+                  exit 1
+                fi ;;
+              *)
+                jq . "$answer" 2> /dev/null || true
+                echo "::error::The deploy gateway reported ${status:-HTTP $code} (deploy/aws/README.md, Troubleshooting)"
+                exit 1 ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::The deploy did not finish in time"
+              exit 1
+            fi
+            sleep 20
+          done
+          jq . "$answer"
 
       - name: Verify production health
-        if: steps.latest.outputs.deploy == 'true'
+        if: steps.deploy.outputs.deployed == 'true'
         run: |
           # Bounded retries: Caddy may still be starting after the containers were replaced.
           for path in /api/health /api/health/ready; do
@@ -307,9 +373,9 @@ jobs:
             "$PRODUCTION_URL/" | grep -q '<div id="root">'
           echo "Deployed $COMMIT_SHA to $PRODUCTION_URL" >> "$GITHUB_STEP_SUMMARY"
 
-  # Mode A (standard AWS accounts): GitHub OIDC credentials and SSM Run Command, no runner on
-  # the instance. Needs the OIDC resources (GitHubDeployMode=oidc-ssm in the stack), which an AWS
-  # Free Tier Project's SCP forbids. Same conditions as deploy-aws otherwise.
+  # Mode A (standard AWS accounts): GitHub OIDC credentials for AWS and SSM Run Command. Needs the
+  # OIDC resources (GitHubDeployMode=oidc-ssm in the stack), which an AWS Free Tier Project's SCP
+  # forbids. Same conditions as deploy-aws otherwise.
   deploy-aws-oidc:
     name: Deploy to AWS (OIDC + SSM)
     needs: [all-checks]
