@@ -16,8 +16,9 @@ Metadata:
         Parameters: [DataVolumeSize, ExistingDataVolumeId]
       - Label: { default: Application }
         Parameters: [GitHubRepository, GitRef, DeployKeyParameterName, DomainName]
-      - Label: { default: Continuous deployment (GitHub Actions OIDC) }
-        Parameters: [GitHubOwnerId, GitHubRepositoryId, GitHubDeployBranch, ExistingGitHubOidcProviderArn]
+      - Label: { default: Continuous deployment from GitHub Actions }
+        Parameters:
+          [GitHubDeployMode, GitHubOwnerId, GitHubRepositoryId, GitHubDeployBranch, ExistingGitHubOidcProviderArn]
 
 Parameters:
   ImageId:
@@ -87,6 +88,16 @@ Parameters:
     Description: >-
       Optional. A name whose DNS A record points at the stack's Elastic IP. Empty serves HTTPS on
       the Elastic IP itself (a Let's Encrypt IP address certificate).
+  GitHubDeployMode:
+    Type: String
+    Default: self-hosted-runner
+    AllowedValues: [self-hosted-runner, oidc-ssm]
+    Description: >-
+      self-hosted-runner (the default) creates no AWS resources for deploys: a GitHub Actions
+      runner on the instance deploys (deploy/aws/README.md, Mode B). Required in AWS Free Tier
+      Projects, whose Service Control Policy (DenyIAMRestrictedActions) denies iam:*Provider*.
+      oidc-ssm creates the GitHub OIDC provider, a deploy role and an SSM document (Mode A),
+      for accounts without that SCP.
   GitHubOwnerId:
     Type: String
     Default: "189591398"
@@ -119,7 +130,10 @@ Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
   HasDeployKey: !Not [!Equals [!Ref DeployKeyParameterName, ""]]
   HasAvailabilityZone: !Not [!Equals [!Ref AvailabilityZone, ""]]
-  CreateGitHubOidcProvider: !Equals [!Ref ExistingGitHubOidcProviderArn, ""]
+  UseOidcDeploy: !Equals [!Ref GitHubDeployMode, oidc-ssm]
+  CreateGitHubOidcProvider: !And
+    - !Condition UseOidcDeploy
+    - !Equals [!Ref ExistingGitHubOidcProviderArn, ""]
 
 Resources:
   # --- Network: one public subnet in its own VPC. No NAT gateway, no private subnets: the only
@@ -516,9 +530,10 @@ Resources:
         # Building the image on a micro instance in standard CPU mode is slow (README).
         Timeout: PT60M
 
-  # --- Continuous deployment: GitHub Actions on main exchanges its OIDC token for short-lived
-  # credentials of GitHubDeployRole, which can only run DeployDocument on this one instance
-  # (deploy/aws/README.md, "Automatic deploys"). No AWS access keys exist anywhere.
+  # --- Continuous deployment, Mode A (GitHubDeployMode=oidc-ssm only): GitHub Actions on main
+  # exchanges its OIDC token for short-lived credentials of GitHubDeployRole, which can only run
+  # DeployDocument on this one instance (deploy/aws/README.md). No AWS access keys exist
+  # anywhere. Mode B, the default, creates none of these three resources.
 
   GitHubOidcProvider:
     Type: AWS::IAM::OIDCProvider
@@ -531,6 +546,7 @@ Resources:
   # document only runs spendwise-deploy, and only with a full commit SHA.
   DeployDocument:
     Type: AWS::SSM::Document
+    Condition: UseOidcDeploy
     Properties:
       Name: !Sub ${AWS::StackName}-deploy
       DocumentType: Command
@@ -557,6 +573,7 @@ Resources:
 
   GitHubDeployRole:
     Type: AWS::IAM::Role
+    Condition: UseOidcDeploy
     Properties:
       Description: GitHub Actions deploys of one repository branch to the SpendWise instance, via SSM only
       MaxSessionDuration: 3600
@@ -616,11 +633,14 @@ Outputs:
     Description: Shell on the instance (needs the Session Manager plugin for the AWS CLI)
     Value: !Sub aws ssm start-session --region ${AWS::Region} --target ${Instance}
   GitHubDeployRoleArn:
+    Condition: UseOidcDeploy
     Description: GitHub repository variable AWS_DEPLOY_ROLE_ARN
     Value: !GetAtt GitHubDeployRole.Arn
   DeployDocumentName:
+    Condition: UseOidcDeploy
     Description: GitHub repository variable AWS_DEPLOY_DOCUMENT
     Value: !Ref DeployDocument
   GitHubOidcProviderArn:
+    Condition: UseOidcDeploy
     Description: Pass as ExistingGitHubOidcProviderArn to another stack in this account
     Value: !If [CreateGitHubOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingGitHubOidcProviderArn]

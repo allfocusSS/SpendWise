@@ -217,6 +217,12 @@ def test_database_lives_on_the_data_volume() -> None:
 
 
 # --- Continuous deployment from GitHub Actions (Issue #11) ---
+#
+# Mode B, the default (GitHubDeployMode=self-hosted-runner): AWS Free Tier Projects have a Service
+# Control Policy (DenyIAMRestrictedActions) that denies iam:*Provider*, so the stack must create
+# no OIDC provider; a runner on the instance deploys. Mode A (oidc-ssm) adds the OIDC resources.
+OIDC_RESOURCES = {"GitHubOidcProvider", "DeployDocument", "GitHubDeployRole"}
+OIDC_OUTPUTS = {"GitHubDeployRoleArn", "DeployDocumentName", "GitHubOidcProviderArn"}
 
 # gh api repos/allfocusSS/SpendWise --jq '{repo_id: .id, owner_id: .owner.id}'. The repository
 # uses GitHub's immutable OIDC subject format (created after 15 July 2026), which embeds both IDs.
@@ -245,6 +251,38 @@ def evaluate(stack: dict[str, Any], value: Any, names: dict[str, Any] | None = N
     return value
 
 
+def condition_holds(stack: dict[str, Any], name: str, overrides: dict[str, str]) -> bool:
+    """Evaluates a stack condition with parameter defaults, plus overrides."""
+
+    def value(node: Any) -> Any:
+        if isinstance(node, dict) and set(node) == {"Ref"}:
+            ref = node["Ref"]
+            return overrides.get(ref, stack["Parameters"][ref].get("Default"))
+        return node
+
+    def holds(node: Any) -> bool:
+        ((key, arg),) = node.items()
+        if key == "Fn::Equals":
+            return value(arg[0]) == value(arg[1])
+        if key == "Fn::And":
+            return all(holds(item) for item in arg)
+        if key == "Fn::Not":
+            return not holds(arg[0])
+        if key in ("Condition", "Fn::Condition"):  # !Condition reads as Fn::Condition
+            return condition_holds(stack, arg, overrides)
+        raise AssertionError(f"unsupported condition {key}")
+
+    return holds(stack["Conditions"][name])
+
+
+def created(stack: dict[str, Any], section: str, overrides: dict[str, str]) -> set[str]:
+    return {
+        name
+        for name, body in stack[section].items()
+        if "Condition" not in body or condition_holds(stack, body["Condition"], overrides)
+    }
+
+
 def deploy_role(stack: dict[str, Any]) -> dict[str, Any]:
     return stack["Resources"]["GitHubDeployRole"]["Properties"]
 
@@ -252,6 +290,32 @@ def deploy_role(stack: dict[str, Any]) -> dict[str, Any]:
 def deploy_statements(stack: dict[str, Any]) -> list[dict[str, Any]]:
     (policy,) = deploy_role(stack)["Policies"]
     return policy["PolicyDocument"]["Statement"]
+
+
+def test_free_tier_mode_is_the_default_and_creates_no_oidc_resources(stack) -> None:
+    mode = stack["Parameters"]["GitHubDeployMode"]
+    assert mode["Default"] == "self-hosted-runner"
+    assert set(mode["AllowedValues"]) == {"self-hosted-runner", "oidc-ssm"}
+    resources_ = created(stack, "Resources", {})
+    assert not OIDC_RESOURCES & resources_
+    assert not OIDC_OUTPUTS & created(stack, "Outputs", {})
+    # Nothing else in the default template is an identity provider either.
+    assert not [r for r in resources_ if "Provider" in stack["Resources"][r]["Type"]]
+    # Updating the existing stack with defaults keeps every resource it already had.
+    assert set(stack["Resources"]) - OIDC_RESOURCES <= resources_
+
+
+def test_oidc_mode_creates_the_oidc_resources(stack) -> None:
+    mode = {"GitHubDeployMode": "oidc-ssm"}
+    assert created(stack, "Resources", mode) >= OIDC_RESOURCES
+    assert created(stack, "Outputs", mode) >= OIDC_OUTPUTS
+    # With an existing provider passed in, the stack does not create (or own) one.
+    existing = mode | {
+        "ExistingGitHubOidcProviderArn": "arn:aws:iam::123456789012:oidc-provider/"
+        "token.actions.githubusercontent.com"
+    }
+    assert "GitHubOidcProvider" not in created(stack, "Resources", existing)
+    assert {"DeployDocument", "GitHubDeployRole"} <= created(stack, "Resources", existing)
 
 
 def test_github_oidc_provider_issues_tokens_for_sts_only(stack) -> None:

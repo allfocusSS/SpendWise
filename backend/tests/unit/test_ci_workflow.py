@@ -2,6 +2,11 @@
 
 These read the workflow as data; nothing talks to GitHub or AWS. actionlint checks the workflow
 syntax and its shell scripts (deploy/aws/README.md).
+
+Two deploy jobs, picked by the repository variable AWS_DEPLOY_MODE:
+- deploy-aws (self-hosted-runner): on the production instance's own runner, for AWS Free Tier
+  Projects, whose Service Control Policy denies iam:*Provider* (so no OIDC provider can exist);
+- deploy-aws-oidc (oidc-ssm): GitHub OIDC credentials and SSM Run Command.
 """
 
 import re
@@ -13,6 +18,8 @@ import yaml
 
 WORKFLOW = Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ci.yml"
 TEST_JOBS = {"backend", "backend-postgres", "frontend", "integration", "e2e"}
+DEPLOY_JOBS = {"deploy-aws": "self-hosted-runner", "deploy-aws-oidc": "oidc-ssm"}
+RUNNER_LABELS = ["self-hosted", "linux", "spendwise-deploy"]
 PINNED_ACTION = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
 
 
@@ -22,16 +29,22 @@ def workflow() -> dict[str, Any]:
 
 
 @pytest.fixture(scope="module")
-def deploy(workflow) -> dict[str, Any]:
+def runner_deploy(workflow) -> dict[str, Any]:
     return workflow["jobs"]["deploy-aws"]
 
 
-def steps_using(job: dict[str, Any], action: str) -> list[dict[str, Any]]:
-    return [step for step in job["steps"] if step.get("uses", "").startswith(action + "@")]
+@pytest.fixture(scope="module")
+def oidc_deploy(workflow) -> dict[str, Any]:
+    return workflow["jobs"]["deploy-aws-oidc"]
 
 
 def run_scripts(job: dict[str, Any]) -> str:
     return "\n".join(step.get("run", "") for step in job["steps"])
+
+
+def runs_on(job: dict[str, Any]) -> list[str]:
+    labels = job["runs-on"]
+    return [labels] if isinstance(labels, str) else labels
 
 
 def test_ci_still_runs_for_pull_requests_and_pushes_to_main(workflow) -> None:
@@ -41,46 +54,101 @@ def test_ci_still_runs_for_pull_requests_and_pushes_to_main(workflow) -> None:
     assert workflow["permissions"] == {"contents": "read"}
 
 
-def test_deploy_waits_for_every_ci_job(workflow, deploy) -> None:
-    assert deploy["needs"] == ["all-checks"]
-    all_checks = workflow["jobs"]["all-checks"]
-    assert set(all_checks["needs"]) == TEST_JOBS
-    # all-checks itself always runs and fails unless every test job succeeded; deploy-aws has no
-    # always()/failure() override, so it runs only when all-checks succeeded.
-    assert "always()" not in deploy["if"] and "failure()" not in deploy["if"]
+def test_only_the_deploy_job_uses_the_self_hosted_runner(workflow, runner_deploy) -> None:
+    assert runs_on(runner_deploy) == RUNNER_LABELS
+    for name, job in workflow["jobs"].items():
+        if name != "deploy-aws":
+            labels = runs_on(job)
+            assert labels == ["ubuntu-latest"], (name, labels)
+            assert "self-hosted" not in labels and "spendwise-deploy" not in labels
 
 
-def test_deploy_runs_only_for_a_push_to_main_in_this_repository(deploy) -> None:
-    condition = deploy["if"]
+@pytest.mark.parametrize("job_name", DEPLOY_JOBS)
+def test_deploy_waits_for_every_ci_job(workflow, job_name) -> None:
+    job = workflow["jobs"][job_name]
+    assert job["needs"] == ["all-checks"]
+    assert set(workflow["jobs"]["all-checks"]["needs"]) == TEST_JOBS
+    # all-checks always runs and fails unless every test job succeeded. Without an always() or
+    # failure() override, a job that needs it runs only when it succeeded.
+    assert "always()" not in job["if"] and "failure()" not in job["if"]
+
+
+@pytest.mark.parametrize(("job_name", "mode"), DEPLOY_JOBS.items())
+def test_deploy_runs_only_for_a_push_to_main_in_this_repository(workflow, job_name, mode) -> None:
+    condition = workflow["jobs"][job_name]["if"]
     assert "github.event_name == 'push'" in condition
     assert "github.ref == 'refs/heads/main'" in condition
     assert "github.repository == 'allfocusSS/SpendWise'" in condition
+    assert f"vars.AWS_DEPLOY_MODE == '{mode}'" in condition
+    # Every clause is required: no "||" that could let another event through.
+    assert "||" not in condition
     assert "pull_request" not in condition
 
 
-def test_only_the_deploy_job_can_request_an_oidc_token(workflow, deploy) -> None:
-    assert deploy["permissions"] == {"contents": "read", "id-token": "write"}
+def test_pull_requests_never_reach_a_deploy_job(workflow) -> None:
+    for name in DEPLOY_JOBS:
+        condition = workflow["jobs"][name]["if"]
+        # A pull_request run has github.event_name == 'pull_request', so this clause is false.
+        assert condition.startswith("github.event_name == 'push' &&")
+
+
+def test_runner_deploy_job_runs_no_actions_and_gets_no_token(runner_deploy) -> None:
+    # No checkout and no third-party action on the production host: only the inline steps of
+    # this workflow, as it is on main.
+    assert all("uses" not in step for step in runner_deploy["steps"])
+    assert runner_deploy["permissions"] == {}
+    assert "environment" not in runner_deploy
+
+
+def test_runner_deploy_uses_only_the_narrow_sudo_wrapper(runner_deploy) -> None:
+    script = run_scripts(runner_deploy)
+    sudo_calls = re.findall(r"\bsudo\b.*", script)
+    wrapper = 'sudo -n /usr/local/sbin/spendwise-deploy-sha "$COMMIT_SHA"'
+    assert sudo_calls == [wrapper + ' 2>&1 | tee "$RUNNER_TEMP/deploy.log"']
+
+
+@pytest.mark.parametrize("job_name", DEPLOY_JOBS)
+def test_the_tested_commit_is_deployed_not_a_branch(workflow, job_name) -> None:
+    job = workflow["jobs"][job_name]
+    assert job["env"]["COMMIT_SHA"] == "${{ github.sha }}"
+    script = run_scripts(job)
+    assert "^[0-9a-f]{40}$" in script
+    # The instance must report deploying that same commit.
+    assert 'grep -q "^Deploying $COMMIT_SHA "' in script
+    assert "spendwise-deploy main" not in script and "CommitSha=main" not in script
+
+
+def test_oidc_job_sends_the_tested_commit_through_ssm(oidc_deploy) -> None:
+    script = run_scripts(oidc_deploy)
+    assert '--parameters "CommitSha=$COMMIT_SHA"' in script
+    assert '--document-name "$DEPLOY_DOCUMENT"' in script
+    assert '--instance-ids "$INSTANCE_ID"' in script
+
+
+def test_only_the_oidc_job_can_request_an_oidc_token(workflow, oidc_deploy) -> None:
+    assert oidc_deploy["permissions"] == {"contents": "read", "id-token": "write"}
     for name, job in workflow["jobs"].items():
-        if name != "deploy-aws":
+        if name != "deploy-aws-oidc":
             assert "id-token" not in job.get("permissions", {}), name
 
 
-def test_deploy_job_has_no_environment(deploy) -> None:
-    # An environment changes the OIDC subject to ...:environment:NAME, which the role does not
-    # trust; the trust policy is keyed on the branch (refs/heads/main).
-    assert "environment" not in deploy
-
-
-def test_aws_credentials_come_from_oidc_only(deploy) -> None:
-    (step,) = steps_using(deploy, "aws-actions/configure-aws-credentials")
+def test_oidc_credentials_come_from_the_role_only(oidc_deploy) -> None:
+    (step,) = [s for s in oidc_deploy["steps"] if "configure-aws-credentials" in s.get("uses", "")]
     inputs = step["with"]
     assert inputs["role-to-assume"] == "${{ vars.AWS_DEPLOY_ROLE_ARN }}"
     assert inputs["audience"] == "sts.amazonaws.com"
     assert not {"aws-access-key-id", "aws-secret-access-key", "aws-session-token"} & set(inputs)
+
+
+def test_no_static_aws_credentials_or_secrets_anywhere() -> None:
     text = WORKFLOW.read_text()
-    assert "AWS_ACCESS_KEY_ID" not in text
-    assert "AWS_SECRET_ACCESS_KEY" not in text
-    assert "secrets." not in text
+    for forbidden in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "aws-access-key-id",
+        "secrets.",
+    ):
+        assert forbidden not in text
 
 
 def test_every_action_is_pinned_to_a_commit(workflow) -> None:
@@ -90,41 +158,29 @@ def test_every_action_is_pinned_to_a_commit(workflow) -> None:
                 assert PINNED_ACTION.match(step["uses"]), (name, step["uses"])
 
 
-def test_the_tested_commit_is_deployed_not_a_branch(deploy) -> None:
-    assert deploy["env"]["COMMIT_SHA"] == "${{ github.sha }}"
-    script = run_scripts(deploy)
-    assert '--parameters "CommitSha=$COMMIT_SHA"' in script
-    assert '--document-name "$DEPLOY_DOCUMENT"' in script
-    assert '--instance-ids "$INSTANCE_ID"' in script
-    # The instance must report the same commit.
-    assert 'grep -q "^Deploying $COMMIT_SHA "' in script
+@pytest.mark.parametrize("job_name", DEPLOY_JOBS)
+def test_production_health_is_verified_after_the_deploy(workflow, job_name) -> None:
+    script = run_scripts(workflow["jobs"][job_name])
+    assert "for path in /api/health /api/health/ready; do" in script
+    assert "--retry 12" in script and "--max-time 10" in script
+    assert '"$PRODUCTION_URL/" | grep -q \'<div id="root">\'' in script
+    assert workflow["jobs"][job_name]["env"]["PRODUCTION_URL"] == "${{ vars.PRODUCTION_URL }}"
 
 
-def test_deploy_settings_come_from_repository_variables(deploy) -> None:
-    env = deploy["env"]
-    assert env["AWS_REGION"] == "${{ vars.AWS_REGION }}"
-    assert env["INSTANCE_ID"] == "${{ vars.AWS_INSTANCE_ID }}"
-    assert env["DEPLOY_DOCUMENT"] == "${{ vars.AWS_DEPLOY_DOCUMENT }}"
-    assert env["PRODUCTION_URL"] == "${{ vars.PRODUCTION_URL }}"
-    assert "vars.AWS_DEPLOY_ROLE_ARN != ''" in deploy["if"]
+@pytest.mark.parametrize("job_name", DEPLOY_JOBS)
+def test_deploys_are_bounded_and_never_overlap(workflow, job_name) -> None:
+    job = workflow["jobs"][job_name]
+    assert job["timeout-minutes"] <= 90
+    assert job["concurrency"] == {"group": "deploy-aws-production", "cancel-in-progress": False}
 
 
-def test_deploy_result_is_polled_with_a_deadline_and_failures_fail_the_job(deploy) -> None:
-    script = run_scripts(deploy)
+def test_runner_deploy_step_has_its_own_timeout(runner_deploy) -> None:
+    (step,) = [s for s in runner_deploy["steps"] if s["name"] == "Deploy the commit"]
+    assert step["timeout-minutes"] <= 60
+
+
+def test_oidc_result_is_polled_with_a_deadline(oidc_deploy) -> None:
+    script = run_scripts(oidc_deploy)
     assert "aws ssm get-command-invocation" in script
     assert "deadline=$((SECONDS + " in script
     assert 'if [ "$status" != Success ]; then' in script
-    assert deploy["timeout-minutes"] <= 90
-
-
-def test_production_health_is_verified_after_the_deploy(deploy) -> None:
-    script = run_scripts(deploy)
-    assert "for path in /api/health /api/health/ready; do" in script
-    assert "--retry 12" in script and "--max-time 10" in script
-
-
-def test_deploys_never_overlap_or_get_cancelled(deploy) -> None:
-    assert deploy["concurrency"] == {
-        "group": "deploy-aws-production",
-        "cancel-in-progress": False,
-    }

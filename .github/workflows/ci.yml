@@ -4,9 +4,13 @@ name: CI
 # backend (SQLite and PostgreSQL), frontend, the Docker Compose integration suite and the
 # Playwright end-to-end suite. No secrets are used or needed.
 #
-# After every job passed on a push to main, deploy-aws deploys that exact commit to the AWS
-# instance with short-lived credentials from GitHub's OIDC token (deploy/aws/README.md,
-# "Automatic deploys"). Pull requests never deploy.
+# After every job passed on a push to main, that exact commit is deployed to the AWS instance
+# (deploy/aws/README.md, "Automatic deploys"). The repository variable AWS_DEPLOY_MODE picks how:
+#   self-hosted-runner  deploy-aws runs on the instance's own runner (AWS Free Tier Projects,
+#                       whose SCP denies iam:*Provider*, so no OIDC provider can exist)
+#   oidc-ssm            deploy-aws-oidc uses GitHub OIDC credentials and SSM Run Command
+# Unset, nothing is deployed. Pull requests never deploy, and every other job runs on
+# GitHub-hosted runners.
 
 on:
   pull_request:
@@ -16,7 +20,7 @@ on:
   workflow_dispatch:
 
 # Read-only token. Uploading artifacts and using the cache do not need extra permissions.
-# deploy-aws alone also gets id-token: write.
+# deploy-aws gets no token at all; deploy-aws-oidc alone also gets id-token: write.
 permissions:
   contents: read
 
@@ -229,15 +233,89 @@ jobs:
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
         run: exit 1
 
-  # Continuous deployment to AWS: only for a push to main, only after "All checks passed"
-  # succeeded, and only in this repository. Skipped (not failed) until the repository variables
-  # exist, so this can be merged before the CloudFormation stack is updated.
+  # Mode B (AWS Free Tier Project): deploy on the instance's own self-hosted runner. Only for a
+  # push to main of this repository, only after "All checks passed" succeeded. The runner's
+  # job-started hook refuses every other job, and its user may run exactly one root command:
+  # the deploy wrapper, for the current head of main (deploy/aws/runner/).
   deploy-aws:
-    name: Deploy to AWS
+    name: Deploy to AWS (self-hosted runner)
     needs: [all-checks]
     if: >-
       github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-      github.repository == 'allfocusSS/SpendWise' && vars.AWS_DEPLOY_ROLE_ARN != ''
+      github.repository == 'allfocusSS/SpendWise' && vars.AWS_DEPLOY_MODE == 'self-hosted-runner'
+    runs-on: [self-hosted, linux, spendwise-deploy]
+    timeout-minutes: 60
+    # No GITHUB_TOKEN on the production host: no step needs one, and nothing is checked out.
+    permissions: {}
+    concurrency:
+      group: deploy-aws-production
+      cancel-in-progress: false
+    env:
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      # The commit this run tested, never "main": a later push cannot slip into this deploy.
+      COMMIT_SHA: ${{ github.sha }}
+    steps:
+      - name: Check the deployment settings
+        run: |
+          if ! [[ $PRODUCTION_URL =~ ^https://[A-Za-z0-9.-]+$ ]]; then
+            echo "::error::Repository variable PRODUCTION_URL is missing or invalid (deploy/aws/README.md)"
+            exit 1
+          fi
+          if ! [[ $COMMIT_SHA =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unexpected commit SHA: $COMMIT_SHA"
+            exit 1
+          fi
+
+      # An older commit can finish CI after a newer one; the newer run deploys instead. (The
+      # wrapper refuses anything but the head of main as well.)
+      - name: Skip if main has moved on
+        id: latest
+        run: |
+          head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)
+          if [ "$head" = "$COMMIT_SHA" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::main is now at $head; that run deploys instead of $COMMIT_SHA."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Runs locally on the instance: fetch, build, `docker compose up --wait`; fails unless the
+      # stack becomes healthy. The step timeout bounds it.
+      - name: Deploy the commit
+        if: steps.latest.outputs.deploy == 'true'
+        timeout-minutes: 50
+        run: |
+          set -o pipefail
+          sudo -n /usr/local/sbin/spendwise-deploy-sha "$COMMIT_SHA" 2>&1 | tee "$RUNNER_TEMP/deploy.log"
+          if ! grep -q "^Deploying $COMMIT_SHA " "$RUNNER_TEMP/deploy.log"; then
+            echo "::error::spendwise-deploy did not report deploying $COMMIT_SHA"
+            exit 1
+          fi
+
+      - name: Verify production health
+        if: steps.latest.outputs.deploy == 'true'
+        run: |
+          # Bounded retries: Caddy may still be starting after the containers were replaced.
+          for path in /api/health /api/health/ready; do
+            echo "GET $PRODUCTION_URL$path"
+            curl -fsS --max-time 10 --retry 12 --retry-delay 5 --retry-all-errors \
+              "$PRODUCTION_URL$path"
+            echo
+          done
+          echo "GET $PRODUCTION_URL/"
+          curl -fsS --max-time 10 --retry 3 --retry-delay 5 --retry-all-errors \
+            "$PRODUCTION_URL/" | grep -q '<div id="root">'
+          echo "Deployed $COMMIT_SHA to $PRODUCTION_URL" >> "$GITHUB_STEP_SUMMARY"
+
+  # Mode A (standard AWS accounts): GitHub OIDC credentials and SSM Run Command, no runner on
+  # the instance. Needs the OIDC resources (GitHubDeployMode=oidc-ssm in the stack), which an AWS
+  # Free Tier Project's SCP forbids. Same conditions as deploy-aws otherwise.
+  deploy-aws-oidc:
+    name: Deploy to AWS (OIDC + SSM)
+    needs: [all-checks]
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      github.repository == 'allfocusSS/SpendWise' && vars.AWS_DEPLOY_MODE == 'oidc-ssm'
     runs-on: ubuntu-latest
     # The deploy builds the image on a micro instance (up to 50 minutes, the document's limit).
     timeout-minutes: 65

@@ -1,0 +1,8 @@
+# Installed as /etc/sudoers.d/spendwise-runner (root, 0440) by install-runner.sh, after
+# `visudo -cf` accepts it.
+#
+# The deploy runner's user may run exactly one command as root, without a password: the deploy
+# wrapper, with one argument that sudo itself checks is a 40-character lowercase commit SHA
+# (regular expressions need sudo 1.9.10 or newer; Amazon Linux 2023 has it). The wrapper checks
+# the argument again. No shells, no other commands, no other users.
+spendwise-runner ALL=(root) NOPASSWD: /usr/local/sbin/spendwise-deploy-sha ^[0-9a-f]{40}$
