@@ -3,6 +3,7 @@
 - `serve()` is their session `stack` fixture: the real Compose stack plus LGTM and the alert
   receiver, with the same isolation as the integration tests (integration/stack.py): its own
   project, ports and image tag, a scrubbed environment, and everything removed afterwards.
+- `wait_until_ready()` waits for Grafana and its provisioned data sources (see there).
 - `Backends` reaches Prometheus, Loki and Tempo through Grafana's data source proxy: Grafana is
   the only port the stack publishes.
 - `wait_for()` polls a check until it passes or a deadline expires: no fixed sleeps.
@@ -75,6 +76,83 @@ def grafana_client(stack: Stack) -> Iterator[httpx.Client]:
 
 
 DEADLINE = 120
+
+# The data sources LGTM provisions (its grafana-datasources.yaml) and the tests use: UID → type.
+DATA_SOURCES = {"prometheus": "prometheus", "loki": "loki", "tempo": "tempo"}
+# Answers that mean "still starting", retried until the deadline: the data source isn't
+# provisioned yet (404), or something in front of it isn't up yet (502, 503). Any other answer
+# is a real error (a wrong UID or type, a permission, a URL) and fails at once.
+STARTING = {404, 502, 503}
+
+
+class NotReady(RuntimeError):
+    """Grafana or one of its data sources isn't usable: what, where, and the last answer."""
+
+
+def wait_until_ready(
+    grafana: httpx.Client,
+    data_sources: dict[str, str] = DATA_SOURCES,
+    deadline: float = DEADLINE,
+    interval: float = 0.5,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Grafana's database, then each provisioned data source, all within one deadline.
+
+    /api/health alone isn't enough: Grafana 13 starts its HTTP server and its provisioning as
+    concurrent services, so it can answer "database ok" before the provisioned data sources
+    exist, and the data source proxy then answers 404. LGTM's own health check (and so
+    `docker compose up --wait`) only waits for /api/health.
+    """
+    end = clock() + deadline
+    checks = [("Grafana", "/api/health", healthy)] + [
+        (f"data source {uid!r}", f"/api/datasources/uid/{uid}", provisioned(uid, kind))
+        for uid, kind in data_sources.items()
+    ]
+    for what, path, accept in checks:
+        while True:
+            try:
+                response = grafana.get(path)
+            except httpx.TransportError as error:  # not listening yet
+                last = f"no answer ({type(error).__name__})"
+            else:
+                body = response.text[:200]
+                if response.status_code == 200:
+                    still_starting = accept(response)
+                    if still_starting is None:
+                        break
+                    last = still_starting
+                elif response.status_code in STARTING:
+                    last = f"{response.status_code} {body}"
+                else:
+                    raise NotReady(
+                        f"{what}: GET {path} answered {response.status_code} {body} "
+                        "(not a startup answer: check the UID, the permissions and the URL)"
+                    )
+            if clock() > end:
+                raise NotReady(
+                    f"{what} not ready after {deadline}s: GET {path} last answered {last}. "
+                    "Is it provisioned (LGTM's grafana-datasources.yaml), under this UID?"
+                )
+            sleep(interval)
+
+
+def healthy(response: httpx.Response) -> str | None:
+    """None once Grafana's database is up; otherwise why it is still starting."""
+    database = response.json().get("database")
+    return None if database == "ok" else f"200, database {database!r}"
+
+
+def provisioned(uid: str, kind: str) -> Callable[[httpx.Response], str | None]:
+    def accept(response: httpx.Response) -> None:
+        found = response.json()
+        if (found.get("uid"), found.get("type")) != (uid, kind):
+            raise NotReady(
+                f"data source {uid!r}: expected type {kind!r}, Grafana has "
+                f"uid {found.get('uid')!r} of type {found.get('type')!r}"
+            )
+
+    return accept
 
 
 def wait_for(what: str, check: Callable[[], object], deadline: float = DEADLINE):

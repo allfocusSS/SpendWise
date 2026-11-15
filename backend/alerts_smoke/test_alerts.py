@@ -128,8 +128,7 @@ class Alerting:
 
 @pytest.fixture(scope="module")
 def backends(grafana: httpx.Client) -> Backends:
-    wait_for("Grafana", lambda: grafana.get("/api/health").json().get("database") == "ok")
-    backends = Backends(grafana)
+    backends = Backends(grafana)  # Grafana and its data sources are ready (conftest.py)
     # The app's zero series (metrics.initialize) arrived: from here on every event is an increase.
     wait_for(
         "the app's first metrics in Prometheus",
