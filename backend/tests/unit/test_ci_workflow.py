@@ -17,7 +17,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-TEST_JOBS = {"backend", "backend-postgres", "frontend", "integration", "e2e"}
+TEST_JOBS = {"backend", "backend-postgres", "frontend", "integration", "e2e", "observability"}
 PINNED_ACTION = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
 
 
@@ -53,6 +53,26 @@ def test_ci_runs_every_test_job_and_the_gate(workflow) -> None:
     for result in ("failure", "cancelled", "skipped"):
         assert f"contains(needs.*.result, '{result}')" in fail["if"]
     assert fail["run"] == "exit 1"
+
+
+def test_the_observability_job_runs_the_opentelemetry_smoke_test(workflow) -> None:
+    job = workflow["jobs"]["observability"]
+    assert job["name"] == "Observability (OpenTelemetry)"
+    run = step(job, "OpenTelemetry pipeline (builds the image, Compose stack + Collector)")
+    assert run["run"] == "make observability"
+    makefile = (ROOT / "Makefile").read_text()
+    assert "observability:\n\tcd backend && uv run pytest observability_smoke $(ARGS)" in makefile
+    # Its stack is removed even if the run was interrupted, Collector and volume included.
+    cleanup = step(job, "Remove the test stack and its volume")
+    assert cleanup["if"] == "always()"
+    assert cleanup["run"] == "uv run python -m integration.stack down --observability"
+    assert cleanup["env"]["SPENDWISE_IT_PROJECT"] == "spendwise-otel"
+    # Logs (with what the Collector printed) only when it fails; nothing else leaves the run.
+    upload = step(job, "Upload Compose logs")
+    assert upload["if"] == "failure()"
+    # The workflow's read-only token, nothing more.
+    assert "permissions" not in job
+    assert job["timeout-minutes"] <= 30
 
 
 def test_every_job_runs_on_a_github_hosted_runner(workflow) -> None:

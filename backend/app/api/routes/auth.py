@@ -6,6 +6,8 @@ and in production (see Settings.secure_cookie). Every login or signup issues a n
 the previous session.
 """
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from app.api.deps import (
@@ -22,6 +24,8 @@ from app.schemas.common import ErrorResponse
 from app.services import auth as service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+# Account events, never with the email address, password or session token.
+log = logging.getLogger(__name__)
 
 INVALID_CREDENTIALS = "Invalid email or password"
 
@@ -55,6 +59,7 @@ def signup(
     """Create an account (with its own default categories) and sign in."""
     user = service.create_user(db, data.email, data.password)
     _sign_in(db, request, response, user, token)
+    log.info("Account created")
     return user
 
 
@@ -64,6 +69,7 @@ def login(
 ):
     user = service.authenticate(db, data.email, data.password)
     if user is None:
+        log.warning("Sign-in refused: unknown email or wrong password")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=INVALID_CREDENTIALS)
     _sign_in(db, request, response, user, token)
     return user

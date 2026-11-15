@@ -10,6 +10,9 @@ def build_engine(database_url: str, **kwargs) -> Engine:
     """Create an engine for SQLite (local, tests) or PostgreSQL (production)."""
     is_sqlite = database_url.startswith("sqlite")
     connect_args = {"check_same_thread": False} if is_sqlite else {}
+    # SQL errors (and so the exceptions logs and traces record) never show the values of the
+    # statement: they can be password hashes, emails or transaction notes.
+    kwargs.setdefault("hide_parameters", True)
     if not is_sqlite:
         # PostgreSQL connections can be closed by the server (restart, idle timeout); check each
         # pooled connection before use instead of failing the next request.

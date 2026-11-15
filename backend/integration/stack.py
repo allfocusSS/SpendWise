@@ -44,6 +44,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # The same files `docker compose up` uses locally: the deployment definition plus the local
 # override (published port, image tag, plain-HTTP cookie), all driven by the values below.
 COMPOSE_FILES = (REPO_ROOT / "compose.yaml", REPO_ROOT / "compose.override.yaml")
+# The same, plus the OpenTelemetry Collector and telemetry turned on (observability_smoke/).
+OBSERVABILITY_FILES = (*COMPOSE_FILES, REPO_ROOT / "compose.observability.yaml")
 
 # Only what the Docker CLI needs to find and talk to the daemon is passed through.
 PASSTHROUGH_ENV = (
@@ -85,6 +87,7 @@ class Stack:
     image: str = "spendwise:integration"
     timeout: int = 600
     keep: bool = False
+    compose_files: tuple[Path, ...] = COMPOSE_FILES
     db_password: str = field(default_factory=lambda: secrets.token_hex(16))
     # 40 lowercase hex characters, like the commit SHA a real deploy passes (compose.yaml).
     app_version: str = field(default_factory=lambda: secrets.token_hex(20))
@@ -130,7 +133,7 @@ class Stack:
         command = [
             "docker",
             "compose",
-            *(arg for path in COMPOSE_FILES for arg in ("--file", str(path))),
+            *(arg for path in self.compose_files for arg in ("--file", str(path))),
             "--project-name",
             self.project,
             "--env-file",
@@ -241,8 +244,16 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="Isolated SpendWise Compose stack for tests.")
     parser.add_argument("command", choices=["up", "down", "logs"])
-    command = parser.parse_args(argv).command
+    parser.add_argument(
+        "--observability",
+        action="store_true",
+        help="with the OpenTelemetry Collector (compose.observability.yaml)",
+    )
+    args = parser.parse_args(argv)
+    command = args.command
     stack = Stack.from_env()
+    if args.observability:
+        stack.compose_files = OBSERVABILITY_FILES
 
     if command == "logs":
         print(stack.logs(tail=500))

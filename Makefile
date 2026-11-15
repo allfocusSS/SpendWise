@@ -1,6 +1,6 @@
 # Developer shortcuts. Each target is also documented in README.md as a plain command.
 
-.PHONY: integration e2e
+.PHONY: integration e2e observability
 
 # Integration tests against the real Docker Compose stack (built frontend, FastAPI, PostgreSQL).
 # Needs Docker (with Compose v2) and uv. Builds and starts its own isolated stack on port 18000,
@@ -15,3 +15,10 @@ integration:
 # Extra Playwright arguments: make e2e ARGS="--project=mobile-chromium --grep Analytics"
 e2e:
 	cd frontend && npx playwright install chromium && npx playwright test $(ARGS)
+
+# OpenTelemetry end to end: the same stack plus the Collector (compose.observability.yaml), real
+# traffic, then checks that traces, metrics and logs all reached the Collector, with the right
+# resource and nothing sensitive in them. Needs Docker and uv; its own stack on port 18200,
+# removed afterwards. Extra pytest arguments: make observability ARGS="-x"
+observability:
+	cd backend && uv run pytest observability_smoke $(ARGS)

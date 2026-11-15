@@ -1,0 +1,102 @@
+otel-collector-1  | 2026-11-15T10:46:54.716Z	info	otelconftelemetry/tracer.go:47	Internal trace telemetry disabled	{"resource": {"service.instance.id": "4fc5fcff-33a6-4d33-b291-4f2fa90199c4", "service.name": "otelcol", "service.version": "0.165.0"}}
+otel-collector-1  | 2026-11-15T10:46:54.719Z	info	memorylimiter@v0.165.0/memorylimiter.go:110	Memory limiter configured	{"resource": {"service.instance.id": "4fc5fcff-33a6-4d33-b291-4f2fa90199c4", "service.name": "otelcol", "service.version": "0.165.0"}, "otelcol.component.kind": "processor", "limit_mib": 200, "spike_limit_mib": 50, "check_interval": 1}
+otel-collector-1  | 2026-11-15T10:46:54.725Z	info	service@v0.165.0/service.go:233	Starting otelcol...	{"resource": {"service.instance.id": "4fc5fcff-33a6-4d33-b291-4f2fa90199c4", "service.name": "otelcol", "service.version": "0.165.0"}, "Version": "0.165.0", "NumCPU": 8}
+otel-collector-1  | 2026-11-15T10:47:04.742Z	info	ResourceLog #0
+otel-collector-1  | Resource SchemaURL: 
+otel-collector-1  | Resource attributes:
+otel-collector-1  |      -> telemetry.sdk.language: Str(python)
+otel-collector-1  |      -> telemetry.sdk.name: Str(opentelemetry)
+otel-collector-1  |      -> telemetry.sdk.version: Str(1.45.2)
+otel-collector-1  |      -> service.instance.id: Str(08dc2445-69f1-4eab-ba70-163efe0ce8f7)
+otel-collector-1  |      -> service.name: Str(spendwise-api)
+otel-collector-1  |      -> deployment.environment.name: Str(local)
+otel-collector-1  |      -> service.version: Str(e63ad28dfe1514ed6eabc2141e347dfc5b2de239)
+otel-collector-1  | ScopeLogs #0
+otel-collector-1  | ScopeLogs SchemaURL: 
+otel-collector-1  | InstrumentationScope app.observability.telemetry 
+otel-collector-1  | LogRecord #0
+otel-collector-1  | ObservedTimestamp: 2026-11-15 10:47:02.806838967 +0000 UTC
+otel-collector-1  | Timestamp: 2026-11-15 10:47:02.806763776 +0000 UTC
+otel-collector-1  | SeverityText: INFO
+otel-collector-1  | SeverityNumber: Info(9)
+otel-collector-1  | Body: Str(Telemetry on: OTLP/HTTP to http://otel-collector:4318, 100% of traces)
+otel-collector-1  | Trace ID: 
+otel-collector-1  | Span ID: 
+otel-collector-1  | Flags: 0
+otel-collector-1  | 	{"resource": {"service.instance.id": "4fc5fcff-33a6-4d33-b291-4f2fa90199c4", "service.name": "otelcol", "service.version": "0.165.0"}, "otelcol.component.id": "debug", "otelcol.component.kind": "exporter", "otelcol.signal": "logs"}
+otel-collector-1  | 2026-11-15T10:47:07.753Z	info	ResourceSpans #0
+otel-collector-1  | Resource SchemaURL: 
+otel-collector-1  | Resource attributes:
+otel-collector-1  |      -> telemetry.sdk.language: Str(python)
+otel-collector-1  |      -> telemetry.sdk.name: Str(opentelemetry)
+otel-collector-1  |      -> telemetry.sdk.version: Str(1.45.2)
+otel-collector-1  |      -> service.instance.id: Str(08dc2445-69f1-4eab-ba70-163efe0ce8f7)
+otel-collector-1  |      -> service.name: Str(spendwise-api)
+otel-collector-1  |      -> deployment.environment.name: Str(local)
+otel-collector-1  |      -> service.version: Str(e63ad28dfe1514ed6eabc2141e347dfc5b2de239)
+otel-collector-1  | ScopeSpans #0
+otel-collector-1  | ScopeSpans SchemaURL: https://opentelemetry.io/schemas/1.21.0
+otel-collector-1  | InstrumentationScope opentelemetry.instrumentation.fastapi 0.66b2
+otel-collector-1  | Span #0
+otel-collector-1  |     Trace ID       : f7010304b0c62aa55d4166ed5edb29c7
+otel-collector-1  |     Parent ID      : 
+otel-collector-1  |     ID             : f826baba72a008a8
+otel-collector-1  |     Name           : POST /api/auth/signup
+otel-collector-1  |     Kind           : Server
+otel-collector-1  |     Start time     : 2026-11-15 10:47:06.047315343 +0000 UTC
+otel-collector-1  |     End time       : 2026-11-15 10:47:06.124063843 +0000 UTC
+otel-collector-1  |     Status code    : Unset
+otel-collector-1  |     Status message : 
+otel-collector-1  |     DroppedAttributesCount: 0
+otel-collector-1  |     DroppedEventsCount: 0
+otel-collector-1  |     DroppedLinksCount: 0
+otel-collector-1  | Attributes:
+otel-collector-1  |      -> url.scheme: Str(http)
+otel-collector-1  |      -> server.address: Str(172.20.0.3:8000)
+otel-collector-1  |      -> server.port: Int(8000)
+otel-collector-1  |      -> network.protocol.version: Str(1.1)
+otel-collector-1  |      -> url.path: Str(/api/auth/signup)
+otel-collector-1  |      -> http.request.method: Str(POST)
+otel-collector-1  |      -> http.route: Str(/api/auth/signup)
+otel-collector-1  |      -> http.response.status_code: Int(201)
+otel-collector-1  | 	{"resource": {"service.instance.id": "4fc5fcff-33a6-4d33-b291-4f2fa90199c4", "service.name": "otelcol", "service.version": "0.165.0"}, "otelcol.component.id": "debug", "otelcol.component.kind": "exporter", "otelcol.signal": "logs"}
+otel-collector-1  | 2026-11-15T10:47:08.759Z	info	ResourceMetrics #0
+otel-collector-1  | Resource SchemaURL: 
+otel-collector-1  | Resource attributes:
+otel-collector-1  |      -> telemetry.sdk.language: Str(python)
+otel-collector-1  |      -> telemetry.sdk.name: Str(opentelemetry)
+otel-collector-1  |      -> telemetry.sdk.version: Str(1.45.2)
+otel-collector-1  |      -> service.instance.id: Str(08dc2445-69f1-4eab-ba70-163efe0ce8f7)
+otel-collector-1  |      -> service.name: Str(spendwise-api)
+otel-collector-1  |      -> deployment.environment.name: Str(local)
+otel-collector-1  |      -> service.version: Str(e63ad28dfe1514ed6eabc2141e347dfc5b2de239)
+otel-collector-1  | ScopeMetrics #0
+otel-collector-1  | ScopeMetrics SchemaURL: https://opentelemetry.io/schemas/1.21.0
+otel-collector-1  | InstrumentationScope opentelemetry.instrumentation.fastapi 0.66b2
+otel-collector-1  | Metric #1
+otel-collector-1  | Descriptor:
+otel-collector-1  |      -> Name: http.server.request.duration
+otel-collector-1  |      -> Description: Duration of HTTP server requests.
+otel-collector-1  |      -> Unit: s
+otel-collector-1  |      -> DataType: Histogram
+otel-collector-1  |      -> AggregationTemporality: Cumulative
+otel-collector-1  | HistogramDataPoints #0
+otel-collector-1  | Data point attributes:
+otel-collector-1  |      -> url.scheme: Str(http)
+otel-collector-1  |      -> network.protocol.version: Str(1.1)
+otel-collector-1  |      -> http.request.method: Str(POST)
+otel-collector-1  |      -> http.route: Str(/api/auth/signup)
+otel-collector-1  |      -> http.response.status_code: Int(201)
+otel-collector-1  | StartTimestamp: 2026-11-15 10:47:06.124526052 +0000 UTC
+otel-collector-1  | Timestamp: 2026-11-15 10:47:07.800244344 +0000 UTC
+otel-collector-1  | Count: 1
+otel-collector-1  | Sum: 0.081264
+otel-collector-1  | Min: 0.081264
+otel-collector-1  | Max: 0.081264
+otel-collector-1  | Exemplars:
+otel-collector-1  | Exemplar #0
+otel-collector-1  |      -> Trace ID: f7010304b0c62aa55d4166ed5edb29c7
+otel-collector-1  |      -> Span ID: f826baba72a008a8
+otel-collector-1  |      -> Timestamp: 2026-11-15 10:47:06.124388385 +0000 UTC
+otel-collector-1  |      -> Value: 0.081264
+otel-collector-1  | 	{"resource": {"service.instance.id": "4fc5fcff-33a6-4d33-b291-4f2fa90199c4", "service.name": "otelcol", "service.version": "0.165.0"}, "otelcol.component.id": "debug", "otelcol.component.kind": "exporter", "otelcol.signal": "logs"}

@@ -1,0 +1,46 @@
+# Opt-in observability for the local stack: the API sends traces, metrics and logs over OTLP/HTTP
+# to an OpenTelemetry Collector (docs/observability.md). Without this file nothing changes and
+# the app sends no telemetry at all.
+#
+#   docker compose -f compose.yaml -f compose.override.yaml -f compose.observability.yaml up -d --build
+#   docker compose -f compose.yaml -f compose.override.yaml -f compose.observability.yaml logs -f otel-collector
+#
+# The Collector is only on the internal "telemetry" network: no port is published, and it can't
+# reach the internet (its only exporter prints to its own log). Nothing here is used on AWS or
+# Render.
+
+services:
+  app:
+    environment:
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      # Every trace locally; deployed environments choose a share (docs/observability.md).
+      OTEL_TRACES_SAMPLE_RATIO: "1.0"
+      # Short export intervals so a local check sees data within seconds (the SDK defaults are
+      # 60 s for metrics, 5 s for spans and 1 s for logs).
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      OTEL_BSP_SCHEDULE_DELAY: "1000"
+    networks: [default, telemetry]
+    depends_on:
+      # Started first so the app's first telemetry has somewhere to go. Not a health dependency:
+      # the app serves requests whether or not the Collector is up.
+      otel-collector:
+        condition: service_started
+
+  otel-collector:
+    # Official Collector distribution, pinned by version and multi-architecture digest.
+    image: otel/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d3467740e8642a397c13898ef76d7295c5425164c482ed1b73
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    networks: [telemetry]
+    # The memory_limiter in the config keeps the Collector below this.
+    mem_limit: 256m
+    read_only: true
+    restart: unless-stopped
+    # No healthcheck: the image has no shell or HTTP client to run one with.
+
+networks:
+  # The app and the Collector only. "internal": no route to the outside, and no published port.
+  telemetry:
+    internal: true

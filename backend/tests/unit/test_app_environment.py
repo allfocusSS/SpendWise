@@ -140,24 +140,38 @@ def test_a_production_version_must_be_a_sha_too(monkeypatch) -> None:
     assert settings().version == SHA
 
 
-# --- Telemetry metadata (for the observability work that follows) --------------------------
+# --- Telemetry resource (app/observability, docs/observability.md) -------------------------
 
 
-def test_resource_attributes_name_the_environment_and_the_exact_version() -> None:
+def test_resource_attributes_name_the_service_environment_and_exact_version() -> None:
     config = settings(app_env="production", database_url=PG_URL, app_version=SHA)
     assert config.resource_attributes() == {
-        "service.name": "spendwise",
-        "deployment.environment": "production",
+        "service.name": "spendwise-api",
+        "deployment.environment.name": "production",
         "service.version": SHA,
     }
 
 
-def test_resource_attributes_leave_out_an_unknown_version() -> None:
-    config = settings(app_env="development", database_url=PG_URL)
+def test_resource_attributes_use_current_semantic_conventions() -> None:
+    # deployment.environment was renamed deployment.environment.name in semantic conventions 1.27.
+    attributes = settings(app_env="development", database_url=PG_URL).resource_attributes()
+    assert "deployment.environment" not in attributes
+
+
+@pytest.mark.parametrize("app_env", ["local", "test", "development", "production"])
+def test_resource_attributes_leave_out_an_unknown_version(app_env: str) -> None:
+    # Never a made-up version: without APP_VERSION or RENDER_GIT_COMMIT there is none.
+    config = settings(app_env=app_env, database_url=PG_URL)
     assert config.resource_attributes() == {
-        "service.name": "spendwise",
-        "deployment.environment": "development",
+        "service.name": "spendwise-api",
+        "deployment.environment.name": app_env,
     }
+
+
+def test_resource_attributes_render_commit_is_the_version(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER_GIT_COMMIT", OTHER_SHA)
+    attributes = settings(app_env="development", database_url=PG_URL).resource_attributes()
+    assert attributes["service.version"] == OTHER_SHA
 
 
 def test_resource_attributes_hold_nothing_about_the_database() -> None:
