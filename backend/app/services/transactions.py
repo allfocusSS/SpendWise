@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.errors import BusinessRuleError, NotFoundError
 from app.models import Category, Transaction, TransactionType
+from app.observability import metrics as app_metrics
 from app.schemas.transaction import TransactionCreate, TransactionUpdate
 
 
@@ -69,10 +70,13 @@ def get_transaction(db: Session, user_id: int, transaction_id: int) -> Transacti
 
 
 def create_transaction(db: Session, user_id: int, data: TransactionCreate) -> Transaction:
-    _check_category(db, user_id, data.category_id, data.type)
-    transaction = Transaction(user_id=user_id, **data.model_dump())
-    db.add(transaction)
-    db.commit()
+    # Counted here, once per attempt: as created once the commit succeeded, else as one error
+    # (spendwise.transaction.*, app/observability/metrics.py).
+    with app_metrics.creating_transaction(data.type, data.source):
+        _check_category(db, user_id, data.category_id, data.type)
+        transaction = Transaction(user_id=user_id, **data.model_dump())
+        db.add(transaction)
+        db.commit()
     return get_transaction(db, user_id, transaction.id)
 
 

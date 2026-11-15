@@ -808,17 +808,26 @@ also fails if the page throws an uncaught error or the server answers 5xx.
 
 ## Observability (OpenTelemetry)
 
-The API can send traces, metrics and logs over OTLP/HTTP to an OpenTelemetry Collector. It's off
-by default, and not yet enabled in development or production. To try it locally:
+The API can send traces, metrics and logs over OTLP/HTTP to an OpenTelemetry Collector,
+including its own application metrics: saved transactions, failed saves, AI parsing and refused
+sign-ins. It's off by default, and not yet enabled in development or production. To try it
+locally:
 
 ```bash
+# The SpendWise dashboard in Grafana (Prometheus, Loki, Tempo), on http://127.0.0.1:3000
+docker compose -f compose.yaml -f compose.override.yaml -f compose.dashboard.yaml up -d --build --wait
+cd backend && uv run python scripts/demo_traffic.py --minutes 3     # some demo traffic
+
+# Or a plain Collector that prints what it receives
 docker compose -f compose.yaml -f compose.override.yaml -f compose.observability.yaml up -d --build
-docker compose -f compose.yaml -f compose.override.yaml -f compose.observability.yaml logs -f otel-collector
+
 make observability     # automated: traces, metrics and logs must all reach the Collector
+make dashboard         # automated: metrics in Prometheus, the dashboard, logs in Loki, traces in Tempo
 ```
 
-[docs/observability.md](docs/observability.md) covers the architecture, settings, sampling,
-data policy, failure behaviour and the coming Grafana step.
+The Grafana stack is for development and demos only; it never runs on AWS or Render.
+[docs/observability.md](docs/observability.md) covers the architecture, the application metrics,
+the dashboard, settings, sampling, data policy, failure behaviour and the coming alerts.
 
 ## Continuous integration
 
@@ -836,9 +845,10 @@ only through `.github/workflows/promote-production.yml`, run by hand
 | Integration | builds the image and runs the real Compose stack (PostgreSQL), then the integration suite | `make integration` |
 | End-to-end | builds the image and runs the real Compose stack, then Playwright (Chromium, desktop and phone) | `make e2e` |
 | Observability (OpenTelemetry) | builds the image and runs the Compose stack with an OpenTelemetry Collector; real traffic must produce spans, metric data points and log records at the Collector, with the right resource, trace context in the logs and nothing sensitive in any of them | `make observability` |
+| Observability Dashboard | builds the image and runs the Compose stack with Grafana's LGTM image; real traffic (including controlled failures) must give exact business-metric counts in Prometheus, a provisioned dashboard whose queries all work, logs in Loki and traces in Tempo, and no user data in any metric label | `make dashboard` |
 | All checks passed | succeeds only if every job above succeeded | |
 
-The six test jobs run in parallel; a full run takes roughly as long as the slowest job,
+The seven test jobs run in parallel; a full run takes roughly as long as the slowest job,
 End-to-end, which builds the image and installs Chromium before the tests. Use "All checks
 passed" as the single required status check in branch protection.
 
@@ -891,4 +901,7 @@ make e2e
 
 # OpenTelemetry: traces, metrics and logs reach a Collector (see "Observability")
 make observability
+
+# The Grafana dashboard against real data (see "Observability")
+make dashboard
 ```

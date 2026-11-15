@@ -46,6 +46,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILES = (REPO_ROOT / "compose.yaml", REPO_ROOT / "compose.override.yaml")
 # The same, plus the OpenTelemetry Collector and telemetry turned on (observability_smoke/).
 OBSERVABILITY_FILES = (*COMPOSE_FILES, REPO_ROOT / "compose.observability.yaml")
+# The same, plus Grafana's LGTM stack and the SpendWise dashboard (dashboard_smoke/).
+DASHBOARD_FILES = (*COMPOSE_FILES, REPO_ROOT / "compose.dashboard.yaml")
 
 # Only what the Docker CLI needs to find and talk to the daemon is passed through.
 PASSTHROUGH_ENV = (
@@ -88,6 +90,8 @@ class Stack:
     timeout: int = 600
     keep: bool = False
     compose_files: tuple[Path, ...] = COMPOSE_FILES
+    # Further variables for the Compose files (e.g. GRAFANA_PORT for the dashboard stack).
+    extra_env: dict[str, str] = field(default_factory=dict)
     db_password: str = field(default_factory=lambda: secrets.token_hex(16))
     # 40 lowercase hex characters, like the commit SHA a real deploy passes (compose.yaml).
     app_version: str = field(default_factory=lambda: secrets.token_hex(20))
@@ -127,6 +131,7 @@ class Stack:
             SESSION_COOKIE_SECURE="false",
             SESSION_TTL_DAYS="14",
         )
+        env.update(self.extra_env)
         return env
 
     def compose(self, *args: str, timeout: int = COMMAND_TIMEOUT) -> subprocess.CompletedProcess:
@@ -244,16 +249,24 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="Isolated SpendWise Compose stack for tests.")
     parser.add_argument("command", choices=["up", "down", "logs"])
-    parser.add_argument(
+    extras = parser.add_mutually_exclusive_group()
+    extras.add_argument(
         "--observability",
         action="store_true",
         help="with the OpenTelemetry Collector (compose.observability.yaml)",
+    )
+    extras.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="with Grafana's LGTM stack and the dashboard (compose.dashboard.yaml)",
     )
     args = parser.parse_args(argv)
     command = args.command
     stack = Stack.from_env()
     if args.observability:
         stack.compose_files = OBSERVABILITY_FILES
+    if args.dashboard:
+        stack.compose_files = DASHBOARD_FILES
 
     if command == "logs":
         print(stack.logs(tail=500))

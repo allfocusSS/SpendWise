@@ -1,10 +1,18 @@
 # Observability (OpenTelemetry)
 
 The SpendWise API can send **traces, metrics and logs** over OTLP/HTTP to an OpenTelemetry
-Collector. Locally and in CI, the Collector's only exporter is `debug`, which prints everything
-it receives, and an automated check proves all three signals arrive. Telemetry is **off by
-default** and is **not yet enabled in development (Render) or production (AWS)**. Grafana,
-dashboards, alerts and the AI on-call responder are later steps; none of them exists yet.
+Collector. On top of the HTTP instrumentation it records its own
+[application metrics](#application-metrics): saved transactions, failed saves, AI parsing and
+refused sign-ins.
+
+- **Locally and in CI:**
+  - a plain Collector with a `debug` exporter proves all three signals arrive
+    (`make observability`);
+  - Grafana's all-in-one LGTM image shows the
+    [SpendWise dashboard](#dashboard-grafana-lgtm-local) over Prometheus, Loki and Tempo
+    (`make dashboard`).
+- **Off by default**, and **not yet enabled in development (Render) or production (AWS)**.
+- **Not done yet:** alerts and the AI on-call responder are the next steps.
 
 ```mermaid
 flowchart LR
@@ -79,8 +87,7 @@ HTTP server metrics come from the same instrumentation:
   amount, a raw URL, a query string, a client address or a trace ID.
 - **Exemplars:** histogram points can carry exemplars, a sample trace ID and span ID that link
   a point to one of its traces. They're samples, not attributes, so they don't add series.
-- **Not yet:** business metrics (transactions created, AI parsing results, KPIs) are the next
-  issue.
+- SpendWise's own metrics are in [Application metrics](#application-metrics).
 - Metrics don't depend on trace sampling. They're exported every 60 s by default
   (`OTEL_METRIC_EXPORT_INTERVAL`), and every 5 s in the local overlay.
 
@@ -111,6 +118,77 @@ HTTP server metrics come from the same instrumentation:
   second handler and no record is exported twice.
 - Logs don't depend on trace sampling. A record from an unsampled request is still exported,
   with its trace ID.
+
+## Application metrics
+
+`backend/app/observability/metrics.py` defines them. It creates every instrument once, from the
+process's MeterProvider (`get_meter()`), so no business code creates meters or touches the SDK.
+With telemetry off they're OpenTelemetry's no-op instruments.
+
+| Metric | Type | Unit | Attributes | Counted |
+|---|---|---|---|---|
+| `spendwise.transaction.created` | counter | `{transaction}` | `spendwise.transaction.type` (`income`, `expense`), `spendwise.transaction.source` (`manual`, `ai`) | once per transaction committed to the database |
+| `spendwise.transaction.create.error` | counter | `{error}` | `error.type` | once per failed attempt to save one |
+| `spendwise.auth.sign_in.failure` | counter | `{attempt}` | none | once per refused sign-in, whether the email is unknown or the password wrong (never which) |
+| `spendwise.ai.parse.request` | counter | `{request}` | `spendwise.ai.provider` | once per call to the AI provider to turn text into a transaction draft |
+| `spendwise.ai.parse.error` | counter | `{error}` | `spendwise.ai.provider`, `error.type` | once per such call that failed |
+| `spendwise.ai.parse.duration` | histogram | `s` | `spendwise.ai.provider` (+ `error.type` if it failed) | every call, success or failure, on the monotonic clock. Buckets from 5 ms to 60 s. |
+
+**Where they're counted**, each exactly once:
+
+| Metric | Where |
+|---|---|
+| `spendwise.transaction.*` | the service that saves a transaction (`app/services/transactions.py`), around the check and the commit. A request FastAPI refuses as malformed (422) never reaches it, so it's not an attempt. |
+| `spendwise.auth.sign_in.failure` | the login route, where the sign-in is refused. |
+| `spendwise.ai.parse.*` | `build_ai_provider()` wraps every provider in `MeteredAIProvider` (`app/ai/metered.py`), so any caller of the provider is measured, at the provider call. |
+
+Tests drive the real API and the real factory against an in-memory MeterProvider
+(`tests/integration/test_app_metrics.py`). They prove exactly one count per event, no count for
+reads, updates, deletes or malformed requests, and the bounded attributes.
+
+- **AI parsing has no HTTP endpoint yet.** No route calls the AI provider: that's Issue #2. The
+  metrics are on the real provider call, so they count as soon as something calls it. Until
+  then, the dashboard checks and the demo drive that path in a one-off process inside the app
+  container (`backend/dashboard_smoke/test_dashboard.py`). There is no test-only code in the
+  application.
+- **Error types are a closed list, never an exception name** (`metrics.ErrorType`):
+
+  | `error.type` | Meaning |
+  |---|---|
+  | `validation` | a business rule refused the input, e.g. a category that doesn't exist |
+  | `database` | a SQLAlchemy error |
+  | `provider` | the AI provider was unavailable or failed |
+  | `internal` | anything else |
+
+  For AI parsing, any failure inside the provider is `provider`, unless the provider refused
+  the input as a domain error.
+- **Provider names are a fixed list:** `fake`, `anthropic`, or `other`, never a provider's own
+  name.
+
+**Cardinality and privacy:**
+- Every attribute value comes from a closed set: an enum of `metrics.py`, or of the validated
+  request schema.
+- A view drops any attribute key outside `privacy.APPLICATION_METRIC_ATTRIBUTES` before export,
+  whatever a caller passes.
+- Never used as a metric attribute or value: a user ID, an email, a username, a transaction ID,
+  a category name, a description, an amount or currency text, a path or URL, an IP address, a
+  User-Agent, a trace ID, an exception message, AI input or output, or a database query.
+- Amounts are never recorded at all.
+- Environment and version are on the resource. They become Prometheus labels without being
+  repeated on each data point.
+- The dashboard check sends canary values through the whole stack and confirms that none reach
+  any label, series or the dashboard: an email, a password, a description, an amount, a category
+  name and AI input text.
+
+**Zero series.**
+- **What:** when telemetry starts, `metrics.initialize()` adds 0 to every known series. That's
+  11 series per process.
+- **Why:** a counter would otherwise first appear in Prometheus with its first value already
+  counted, and `rate()` and `increase()` can't see that change. The dashboard's Prometheus also
+  takes a zero at each counter's OTLP start time (`created-timestamp-zero-ingestion`), which
+  covers the HTTP metrics too.
+- **Gap:** after a restart, events before the first export (60 s by default) can still be missed
+  by a backend without that feature.
 
 ## Resource: the same identity on every signal
 
@@ -235,6 +313,111 @@ docker compose -f compose.yaml -f compose.override.yaml -f compose.observability
 - **Running the backend from source:** point `OTEL_EXPORTER_OTLP_ENDPOINT` at a Collector of your
   own. The Compose one isn't reachable from the host.
 
+## Dashboard (Grafana LGTM, local)
+
+The dashboard is for **development and demos**. `compose.dashboard.yaml` adds Grafana's official
+all-in-one image `grafana/otel-lgtm` (0.41.0, pinned by digest) to the local stack. It contains
+an OpenTelemetry Collector, Prometheus, Loki, Tempo and Grafana:
+
+```mermaid
+flowchart LR
+    app["SpendWise API<br/>(traces, metrics, logs)"] -- "OTLP/HTTP :4318<br/>(internal Docker network)" --> col["LGTM's OpenTelemetry Collector"]
+    col --> prom["Prometheus<br/>(metrics)"]
+    col --> loki["Loki<br/>(logs)"]
+    col --> tempo["Tempo<br/>(traces)"]
+    prom --> graf["Grafana<br/>127.0.0.1:3000 only"]
+    loki --> graf
+    tempo --> graf
+```
+
+```bash
+docker compose -f compose.yaml -f compose.override.yaml -f compose.dashboard.yaml up -d --build --wait
+cd backend && uv run python scripts/demo_traffic.py --minutes 3   # demo traffic, local only
+open http://127.0.0.1:3000/d/spendwise-overview                  # SpendWise — Application Overview
+docker compose -f compose.yaml -f compose.override.yaml -f compose.dashboard.yaml down -v   # stop, delete data
+```
+
+- **Grafana:** <http://127.0.0.1:3000>. The dashboard has UID `spendwise-overview` and is also
+  Grafana's home page.
+  - Anyone on the machine can view it and use Explore. Changes need the admin login (`admin` /
+    `admin`, and Grafana asks to change it).
+  - Nothing else is published. The OTLP receiver, Prometheus, Loki and Tempo are reachable only
+    from the app's Docker network.
+  - There is no eBPF instrumentation (`ENABLE_OBI=false`), no privileged mode and no host
+    networking.
+- **AI parsing data:** no HTTP route calls AI parsing yet, so the demo traffic doesn't touch it.
+  To see the AI panels move, run the real provider path in the app container, as the checks do.
+  The `python -c` program `AI_TRAFFIC` in `backend/dashboard_smoke/test_dashboard.py` shows how.
+- **Dashboard as code:** `deploy/observability/grafana/dashboards/spendwise-overview.json` is the
+  dashboard, and `deploy/observability/grafana/dashboards.yaml` provisions it.
+  - Both are mounted read-only at the path the image documents for custom dashboards.
+  - It is read-only in the UI. To change it, edit the JSON, or export a copy from Grafana and
+    commit that. Grafana reloads it within 30 s.
+- **Metrics only, no fixed values:** every panel queries live data, through the Prometheus data
+  source variable (`$datasource`) plus two variables:
+
+  | Variable | Values come from |
+  |---|---|
+  | `environment` | `deployment.environment.name` |
+  | `version` | `service.version` |
+
+  Both read `target_info`. There is no per-user, per-category or per-transaction variable.
+
+**Sections:**
+
+| Section | Panels |
+|---|---|
+| Service health | requests/s, share of 5xx answers, p95 latency, active requests, requests by status class, p50/p95/p99 latency |
+| Transactions | saved, failed saves, failure rate (selected range), saved per minute by type and source, failed saves per minute by error type |
+| AI transaction parsing | requests, failures, success rate, p95 parse time, requests and failures per minute, p50/p95 duration |
+| Authentication | refused sign-ins, and per minute |
+| Runtime | running environment and version (`target_info`), and recent application logs (Loki, each linked to its trace) |
+| Links | Tempo and Loki in Explore |
+
+**How OpenTelemetry names become Prometheus names.** These were checked on the running stack:
+
+- **Metric names:** dots become underscores, the unit becomes a suffix (`_seconds`), counters
+  get `_total`, and units in braces (`{transaction}`) are dropped.
+- **Classic histograms:** explicit-bucket histograms arrive as classic histograms (`_bucket`,
+  `_sum`, `_count`).
+- **Labels:** resource attributes are promoted to `service_name`, `service_version` and
+  `deployment_environment_name`, plus `job` and `instance`.
+
+| OpenTelemetry | Prometheus |
+|---|---|
+| `spendwise.transaction.created` | `spendwise_transaction_created_total{spendwise_transaction_type, spendwise_transaction_source}` |
+| `spendwise.transaction.create.error` | `spendwise_transaction_create_error_total{error_type}` |
+| `spendwise.auth.sign_in.failure` | `spendwise_auth_sign_in_failure_total` |
+| `spendwise.ai.parse.request` / `.error` | `spendwise_ai_parse_request_total{spendwise_ai_provider}` / `spendwise_ai_parse_error_total{spendwise_ai_provider, error_type}` |
+| `spendwise.ai.parse.duration` | `spendwise_ai_parse_duration_seconds_bucket` / `_sum` / `_count` |
+| `http.server.request.duration` | `http_server_request_duration_seconds_bucket{http_route, http_request_method, http_response_status_code, …}` |
+| `http.server.active_requests` | `http_server_active_requests` |
+
+Querying by hand (Grafana, Explore, Prometheus):
+
+```promql
+sum(rate(spendwise_transaction_created_total{service_name="spendwise-api"}[5m])) * 60        # saves per minute
+sum by (error_type) (increase(spendwise_transaction_create_error_total{service_name="spendwise-api"}[1h]))
+histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name="spendwise-api"}[5m])))
+```
+
+- **Logs (Explore, Loki):** `{service_name="spendwise-api"} |= "Sign-in refused"`. The labels
+  are `service_name`, `deployment_environment_name` and `service_instance_id`. `trace_id` and
+  `span_id` are structured metadata, linked to Tempo.
+- **Traces (Explore, Tempo, TraceQL):**
+  `{resource.service.name="spendwise-api" && name="POST /api/transactions"}`. Each span keeps
+  its `deployment.environment.name` and `service.version`.
+
+**Why only locally, and not on the production t3.micro:**
+- The image needs well over 1 GiB of memory on its own; the instance has 1 GiB for PostgreSQL,
+  the app and Caddy.
+- It keeps its data on the container's disk.
+- It runs every backend in one process tree, with no high availability.
+
+Production telemetry, when it's turned on, should go to a managed OTLP backend through the
+existing Collector, or straight from the app. Nothing about the application metrics or the
+dashboard's queries changes; only the endpoint does.
+
 ## Verification
 
 ```bash
@@ -261,9 +444,34 @@ output, with a deadline and no fixed sleeps, and requires:
 - **failure:** with the Collector stopped, the app keeps serving, and once it's back, telemetry
   resumes.
 
+`make dashboard` (`backend/dashboard_smoke/`) does the same against the LGTM stack. It uses
+project `spendwise-dashboard`, the app on port 18300 and Grafana on 127.0.0.1:13000, all removed
+afterwards. It:
+
+- waits until Grafana is healthy and the app's first metrics are in Prometheus, by polling
+  against a deadline;
+- sends real traffic with canary personal data:
+  - a sign-up and a category;
+  - three saved transactions, and one refused for a category that doesn't exist (a controlled
+    failure);
+  - three refused sign-ins;
+  - in a process inside the app container, five AI parses through the real factory, and two
+    through the real metered wrapper around a provider that's down;
+- requires exactly those counts in Prometheus, so nothing is counted twice, with only bounded
+  labels;
+- checks the failure panels moved;
+- checks the dashboard is provisioned from Git (UID, title, folder, panels), that every
+  dashboard query is valid PromQL against the real series and the core panels have data, and
+  that the variables offer the real environment and version;
+- finds the refused sign-ins in Loki and the transaction spans in Tempo, and fetches the trace
+  linked from a log record;
+- confirms no canary appears in any label name, label value, metric metadata or the dashboard,
+  and that only Grafana is published, on 127.0.0.1.
+
 In CI the job **Observability (OpenTelemetry)** runs `make observability` for every pull request
-and every push to `main`. "All checks passed" requires it, and so, through that check, does the
-promotion workflow. The job has the workflow's read-only token only. On failure it uploads the
+and every push to `main`, and the job **Observability Dashboard** runs `make dashboard`. "All
+checks passed" requires both, and so, through that check, does the promotion workflow. Neither
+job has an OIDC token or deploys anything. The job has the workflow's read-only token only. On failure it uploads the
 run's container logs, Collector output included.
 
 ## Turning it on in development or production (not done here)
@@ -283,26 +491,33 @@ When it's time:
   OTLP to a hosted Collector, or to the backend's OTLP gateway, with
   `OTEL_EXPORTER_OTLP_HEADERS` from a Render secret. Either way, set `OTEL_TRACES_SAMPLE_RATIO`.
 
-## Next: Grafana
+## Next: alerts
 
-The app sends OTLP to "the Collector" and knows nothing about what's behind it. The Grafana phase
-changes only `deploy/observability/otel-collector.yaml`:
+Alerts are the next step, and none exists yet. The dashboard's queries are written so alert
+rules can reuse them as they are, with the variables replaced by fixed values. Good first
+candidates:
 
-- **traces:** add an exporter to Tempo (or Grafana Cloud's OTLP endpoint);
-- **metrics:** Mimir or Prometheus (`prometheus_remote_write`, or `otlp_http`);
-- **logs:** Loki (`otlp_http` to Loki's OTLP endpoint);
-- in each pipeline, put the new exporter next to (or in place of) `debug`, and set `debug` to
-  `verbosity: basic`.
+| Alert | Expression (5-minute window) | Suggested threshold |
+|---|---|---|
+| HTTP error rate | `100 * (sum(rate(http_server_request_duration_seconds_count{service_name="spendwise-api", http_response_status_code=~"5.."}[5m])) or vector(0)) / (sum(rate(http_server_request_duration_seconds_count{service_name="spendwise-api"}[5m])) > 0)` | > 5 % for 5 minutes |
+| p95 latency | `histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name="spendwise-api"}[5m])))` | > 1 s for 10 minutes |
+| Transaction save failures | `100 * (sum(rate(spendwise_transaction_create_error_total{service_name="spendwise-api", error_type!="validation"}[5m])) or vector(0)) / ((sum(rate(spendwise_transaction_created_total{service_name="spendwise-api"}[5m])) or vector(0)) + (sum(rate(spendwise_transaction_create_error_total{service_name="spendwise-api"}[5m])) or vector(0)) > 0)` | > 1 % (database and internal errors only: rejected input is the user's doing) |
+| AI parse failures | `100 * (sum(rate(spendwise_ai_parse_error_total{service_name="spendwise-api"}[5m])) or vector(0)) / (sum(rate(spendwise_ai_parse_request_total{service_name="spendwise-api"}[5m])) > 0)` | > 10 % for 10 minutes |
+| Refused sign-ins | `sum(rate(spendwise_auth_sign_in_failure_total{service_name="spendwise-api"}[5m])) * 60` | > 20 per minute (password guessing) |
 
-Application code that adds its own telemetry uses the public API in `app.observability`, never the
-SDK:
+Each would also select `deployment_environment_name="production"`.
+
+## Adding telemetry in code
+
+Application code uses the public API in `app.observability`, never the SDK. New business metrics
+go in `app/observability/metrics.py`, with bounded attributes added to
+`privacy.APPLICATION_METRIC_ATTRIBUTES`:
 
 ```python
 from app.observability import get_meter, get_tracer
+from app.observability import metrics as app_metrics
 
-meter = get_meter(__name__)
-transactions_created = meter.create_counter("spendwise.transactions.created")
-transactions_created.add(1, {"transaction.type": "expense"})   # bounded values only
+app_metrics.sign_in_failed()            # an existing application metric
 
 with get_tracer(__name__).start_as_current_span("categorize"):
     ...

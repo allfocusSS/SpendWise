@@ -17,7 +17,15 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-TEST_JOBS = {"backend", "backend-postgres", "frontend", "integration", "e2e", "observability"}
+TEST_JOBS = {
+    "backend",
+    "backend-postgres",
+    "frontend",
+    "integration",
+    "e2e",
+    "observability",
+    "dashboard",
+}
 PINNED_ACTION = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
 
 
@@ -71,6 +79,24 @@ def test_the_observability_job_runs_the_opentelemetry_smoke_test(workflow) -> No
     upload = step(job, "Upload Compose logs")
     assert upload["if"] == "failure()"
     # The workflow's read-only token, nothing more.
+    assert "permissions" not in job
+    assert job["timeout-minutes"] <= 30
+
+
+def test_the_dashboard_job_runs_the_dashboard_smoke_test(workflow) -> None:
+    job = workflow["jobs"]["dashboard"]
+    assert job["name"] == "Observability Dashboard"
+    assert step(job, "Dashboard (builds the image, Compose stack + Grafana LGTM)")["run"] == (
+        "make dashboard"
+    )
+    makefile = (ROOT / "Makefile").read_text()
+    assert "dashboard:\n\tcd backend && uv run pytest dashboard_smoke $(ARGS)" in makefile
+    cleanup = step(job, "Remove the test stack and its volume")
+    assert cleanup["if"] == "always()"
+    assert cleanup["run"] == "uv run python -m integration.stack down --dashboard"
+    assert cleanup["env"]["SPENDWISE_IT_PROJECT"] == "spendwise-dashboard"
+    assert step(job, "Upload Compose logs")["if"] == "failure()"
+    # The workflow's read-only token only: no OIDC token, nothing deployed.
     assert "permissions" not in job
     assert job["timeout-minutes"] <= 30
 

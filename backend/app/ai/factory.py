@@ -5,14 +5,16 @@ features; the rest of the app keeps working.
 """
 
 from app.ai.fake import FakeAIProvider
+from app.ai.metered import MeteredAIProvider
 from app.ai.provider import AIProvider, AIUnavailableError
 from app.core.config import Settings, get_settings
 
 
 def build_ai_provider(settings: Settings) -> AIProvider:
+    """The configured provider, measured (app/ai/metered.py)."""
     match settings.ai_provider:
         case "fake":
-            return FakeAIProvider()
+            return MeteredAIProvider(FakeAIProvider())
         case "anthropic":
             # The key is a SecretStr and is not read here: only the Anthropic provider (Issue #2)
             # may call get_secret_value(). Never include the key in messages or logs.

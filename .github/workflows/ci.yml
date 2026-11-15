@@ -2,8 +2,8 @@ name: CI
 
 # The complete test suite for every pull request to main and every push to main:
 # backend (SQLite and PostgreSQL), frontend, the Docker Compose integration suite, the
-# Playwright end-to-end suite, and the OpenTelemetry pipeline (traces, metrics and logs reaching
-# a Collector). No secrets are used or needed.
+# Playwright end-to-end suite, the OpenTelemetry pipeline (traces, metrics and logs reaching
+# a Collector), and the Grafana dashboard on a local LGTM stack. No secrets are used or needed.
 #
 # CI only tests; it deploys nothing itself (docs/environments.md):
 #   development  Render deploys each commit on main once these checks pass (render.yaml,
@@ -258,11 +258,55 @@ jobs:
           SPENDWISE_IT_IMAGE: spendwise:otel
         run: uv run python -m integration.stack down --observability
 
+  # The real stack plus Grafana's LGTM image (compose.dashboard.yaml): real traffic, including
+  # controlled failures, then SpendWise's business metrics must be in Prometheus with exact
+  # counts, the dashboard provisioned from Git with every query working, logs in Loki and traces
+  # in Tempo, and none of the canary user data in any metric label or the dashboard.
+  dashboard:
+    name: Observability Dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The run's container logs; uploaded when the job fails.
+      SPENDWISE_DASHBOARD_LOG_FILE: ${{ github.workspace }}/dashboard-compose-logs.txt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+          cache-python: true
+      - name: Docker and Compose versions
+        run: |
+          docker --version
+          docker compose version
+      - name: Dashboard (builds the image, Compose stack + Grafana LGTM)
+        run: make dashboard
+      - name: Upload Compose logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dashboard-compose-logs
+          path: dashboard-compose-logs.txt
+          retention-days: 14
+          if-no-files-found: ignore
+      # The tests remove the stack themselves; this covers interrupted or cancelled runs.
+      - name: Remove the test stack and its volume
+        if: always()
+        working-directory: backend
+        env:
+          SPENDWISE_IT_PROJECT: spendwise-dashboard
+          SPENDWISE_IT_PORT: "18300"
+          SPENDWISE_IT_IMAGE: spendwise:dashboard
+        run: uv run python -m integration.stack down --dashboard
+
   # One stable check for branch protection: it fails unless every job above succeeded.
   all-checks:
     name: All checks passed
     if: always()
-    needs: [backend, backend-postgres, frontend, integration, e2e, observability]
+    needs: [backend, backend-postgres, frontend, integration, e2e, observability, dashboard]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -274,6 +318,7 @@ jobs:
           echo "integration:      ${{ needs.integration.result }}"
           echo "e2e:              ${{ needs.e2e.result }}"
           echo "observability:    ${{ needs.observability.result }}"
+          echo "dashboard:        ${{ needs.dashboard.result }}"
       - name: Fail unless every job succeeded
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
         run: exit 1

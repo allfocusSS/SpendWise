@@ -30,7 +30,7 @@ def ai_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[pytest.MonkeyPatch]:
 
 
 def test_default_provider_works_with_no_key(ai_env: pytest.MonkeyPatch) -> None:
-    assert isinstance(get_ai_provider(), FakeAIProvider)
+    assert isinstance(get_ai_provider().wrapped, FakeAIProvider)  # measured (app/ai/metered.py)
 
 
 def test_local_env_file_cannot_change_the_test_configuration(
@@ -45,7 +45,7 @@ def test_local_env_file_cannot_change_the_test_configuration(
 
     assert settings.ai_provider == "fake"
     assert settings.anthropic_api_key is None
-    assert isinstance(get_ai_provider(), FakeAIProvider)
+    assert isinstance(get_ai_provider().wrapped, FakeAIProvider)  # measured (app/ai/metered.py)
 
 
 def test_app_starts_and_serves_data_when_ai_is_misconfigured(

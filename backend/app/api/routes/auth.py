@@ -19,6 +19,7 @@ from app.api.deps import (
 )
 from app.core.config import get_settings
 from app.models import User
+from app.observability import metrics as app_metrics
 from app.schemas.auth import LoginRequest, SignupRequest, UserRead
 from app.schemas.common import ErrorResponse
 from app.services import auth as service
@@ -70,6 +71,7 @@ def login(
     user = service.authenticate(db, data.email, data.password)
     if user is None:
         log.warning("Sign-in refused: unknown email or wrong password")
+        app_metrics.sign_in_failed()  # one generic count: never which account or why
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=INVALID_CREDENTIALS)
     _sign_in(db, request, response, user, token)
     return user
