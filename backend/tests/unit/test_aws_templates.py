@@ -4,6 +4,8 @@ These read the CloudFormation templates and the Compose additions as data; nothi
 cfn-lint checks the templates against the CloudFormation schema (deploy/aws/README.md).
 """
 
+import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -476,3 +478,110 @@ def test_outputs_give_the_github_repository_variables(stack) -> None:
     ]:
         assert variable in outputs[name]["Description"]
     assert "GitHubOidcProviderArn" in outputs
+
+
+# --- Production identity: APP_ENV and the deployed commit (docs/environments.md) ---
+
+REPO_ROOT = AWS_DIR.parents[1]
+DEPLOYED_SHA = "835f9e36979e446878df74d9c9340bbd3ad46922"
+
+
+def test_the_instance_is_production() -> None:
+    compose = yaml.safe_load((AWS_DIR / "compose.aws.yaml").read_text())
+    assert compose["services"]["app"]["environment"]["APP_ENV"] == "production"
+    base = yaml.safe_load((REPO_ROOT / "compose.yaml").read_text())
+    assert base["services"]["app"]["environment"]["APP_ENV"] == "production"
+    # The version comes from the deploy's environment, never from a file in Git.
+    assert base["services"]["app"]["environment"]["APP_VERSION"] == "${APP_VERSION:-}"
+    # The local override (never used on the instance) makes the local stack "local".
+    local = yaml.safe_load((REPO_ROOT / "compose.override.yaml").read_text())
+    assert local["services"]["app"]["environment"]["APP_ENV"] == "local"
+
+
+def aws_compose_config(tmp_path: Path, **env: str) -> dict[str, Any]:
+    """`docker compose config` of the instance's files, as spendwise-deploy runs them."""
+    empty = tmp_path / "empty.env"
+    empty.write_text("")
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--project-directory",
+            str(REPO_ROOT),
+            "-f",
+            str(REPO_ROOT / "compose.yaml"),
+            "-f",
+            str(AWS_DIR / "compose.aws.yaml"),
+            "--env-file",
+            str(empty),
+            "config",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        # Like the instance: only its two env files' values (stand-ins here) and the wrapper's,
+        # plus what the Docker CLI needs to find its plugins.
+        env={
+            **{k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "DOCKER_CONFIG")},
+            "POSTGRES_PASSWORD": "stand-in-password",
+            "SPENDWISE_SITE_ADDRESS": "54.79.77.189.nip.io",
+            "SPENDWISE_DATA_DIR": "/srv/spendwise",
+            **env,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def has_docker_compose() -> bool:
+    try:
+        return (
+            subprocess.run(["docker", "compose", "version"], capture_output=True, timeout=30)
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+needs_compose = pytest.mark.skipif(not has_docker_compose(), reason="needs docker compose")
+
+
+@needs_compose
+def test_the_deployed_sha_reaches_the_production_app_container(tmp_path) -> None:
+    # The deploy wrapper exports APP_VERSION=<the SHA it deploys> before spendwise-deploy runs
+    # docker compose (test_aws_gateway_host.py); this is what the app container then gets.
+    config = aws_compose_config(tmp_path, APP_VERSION=DEPLOYED_SHA)
+    app = config["services"]["app"]["environment"]
+    assert app["APP_ENV"] == "production"
+    assert app["APP_VERSION"] == DEPLOYED_SHA
+    # Production's database is the db container on the instance, nothing else.
+    assert app["DATABASE_URL"].endswith("@db:5432/spendwise")
+    assert "onrender.com" not in app["DATABASE_URL"]
+
+
+@needs_compose
+def test_without_the_wrapper_production_reports_no_version(tmp_path) -> None:
+    app = aws_compose_config(tmp_path)["services"]["app"]["environment"]
+    assert app["APP_ENV"] == "production"
+    assert app["APP_VERSION"] == ""  # the app reports version null, never a guess
+
+
+def test_production_and_development_never_share_a_database() -> None:
+    render = yaml.safe_load((REPO_ROOT / "render.yaml").read_text())
+    (service,) = render["services"]
+    (database_url,) = [v for v in service["envVars"] if v["key"] == "DATABASE_URL"]
+    # Development: only Render's own database, never a literal URL.
+    assert database_url == {
+        "key": "DATABASE_URL",
+        "fromDatabase": {"name": "spendwise-db", "property": "connectionString"},
+    }
+    # Production: the Compose database on the instance; nothing there points at Render.
+    for path in (REPO_ROOT / "compose.yaml", AWS_DIR / "compose.aws.yaml"):
+        assert "onrender.com" not in path.read_text() and "render" not in path.name
+    assert "nip.io" not in (REPO_ROOT / "render.yaml").read_text()
+    # Neither database is published: no port for db on the instance, no external access on
+    # Render.
+    base = yaml.safe_load((REPO_ROOT / "compose.yaml").read_text())
+    assert "ports" not in base["services"]["db"]
+    assert render["databases"][0]["ipAllowList"] == []

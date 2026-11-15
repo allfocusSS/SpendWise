@@ -18,6 +18,8 @@ services:
     # never replace the image of your local stack.
     image: ${SPENDWISE_IMAGE:-spendwise:local}
     environment:
+      # Not development or production: this stack is on your machine (GET /api/meta says so).
+      APP_ENV: local
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-spendwise}:${POSTGRES_PASSWORD:-spendwise-local-only}@db:5432/${POSTGRES_DB:-spendwise}
       # Plain HTTP on localhost: allow the session cookie without HTTPS. HTTPS requests still get
       # a Secure cookie whatever this says.

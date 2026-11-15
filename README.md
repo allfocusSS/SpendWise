@@ -9,22 +9,20 @@ AI-powered personal finance manager (MVP). Single currency: KZT (₸).
 Each person signs up with an email and password and sees only their own transactions, categories
 and analytics (see [Accounts and security](#accounts-and-security)).
 
-> **Deployment status**
+> **Deployment status**: two environments ([Environments and promotion](docs/environments.md))
 >
-> - **Render: live and verified** at <https://spendwise-amyx.onrender.com/>
->   (see [Deploy to Render](#deploy-to-render)).
-> - **AWS: production live** at <https://54.79.77.189.nip.io>: one EC2 instance in
->   `ap-southeast-2`, created from the CloudFormation templates in `deploy/aws/` (see
->   [Deploy to AWS](#deploy-to-aws-ec2--cloudformation)).
->   - **Continuous deployment** to it is being moved to a GitHub OIDC deploy gateway on the
->     instance: a GitHub-hosted job sends a GitHub OIDC token, which the gateway verifies before
->     deploying that exact commit. AWS can't verify GitHub's tokens itself here, because the AWS
->     Free Tier Project's Service Control Policy denies `iam:*Provider*`. The earlier self-hosted
->     runner fallback was abandoned after GitHub's runner registration kept failing (HTTP 404).
->   - The gateway is implemented and tested locally, but **not yet installed on the instance**,
->     and no automatic deploy has run through it yet. The GitHub OIDC + SSM mode, for accounts
->     that permit IAM federation, is implemented but untested against AWS
->     ([details](deploy/aws/README.md#automatic-deploys-from-github-actions)).
+> | | Development | Production |
+> |---|---|---|
+> | URL | <https://spendwise-amyx.onrender.com/> | <https://54.79.77.189.nip.io> |
+> | Provider | Render ([Deploy to Render](#deploy-to-render)) | AWS: one EC2 instance in `ap-southeast-2` ([Deploy to AWS](#deploy-to-aws-ec2--cloudformation)) |
+> | Database | Render PostgreSQL | PostgreSQL on the instance |
+> | Deploys | automatically, every commit on `main` after CI passed | by hand only: Actions, **Promote Development to Production** |
+>
+> - A push to `main` never deploys production. The promotion workflow deploys the commit that
+>   development runs, after checking that CI passed for it. It goes through the GitHub OIDC
+>   deploy gateway on the instance, which only accepts that workflow's tokens
+>   ([details](deploy/aws/README.md#production-deploys-from-github-actions-manual-promotion)).
+>   `GET /api/meta` reports each environment's name and exact commit.
 > - **Railway: prepared, not deployed.** New-account signup was unavailable at deployment time
 >   (see [Deploy to Railway](#deploy-to-railway)).
 >
@@ -95,7 +93,8 @@ uv run uvicorn app.main:app --reload
 
 - `postgres://` and `postgresql://` URLs are accepted and use psycopg 3 automatically.
 - URL-encode special characters in the password (`@` → `%40`, `/` → `%2F`, `%` → `%25`).
-- `ENVIRONMENT=production` refuses to start unless `DATABASE_URL` is PostgreSQL.
+- `APP_ENV=development` and `APP_ENV=production` refuse to start unless `DATABASE_URL` is
+  PostgreSQL ([Environments](docs/environments.md)).
 - Settings validation errors never print the URL, and `repr(settings)` hides it.
 - There is no tool to copy data from an existing SQLite file; a new PostgreSQL database starts
   empty (plus the default categories).
@@ -168,8 +167,8 @@ variables) or export it in your shell:
 | `SPENDWISE_IMAGE` | `spendwise:local` | tag for the built app image (the integration tests use their own) |
 | `AI_PROVIDER` / `AI_MODEL` / `ANTHROPIC_API_KEY` | `fake` / `claude-opus-5-5` / empty | passed to the app; see [AI providers](#ai-providers) |
 
-Compose sets `ENVIRONMENT=production` and builds `DATABASE_URL`
-(`postgresql+psycopg://USER:PASSWORD@db:5432/DB`) for the app itself. PostgreSQL applies the
+Compose sets `APP_ENV` (`production` in `compose.yaml`, `local` in `compose.override.yaml`) and
+builds `DATABASE_URL` (`postgresql+psycopg://USER:PASSWORD@db:5432/DB`) for the app itself. PostgreSQL applies the
 credentials only when the volume is first created; after changing them, run
 `docker compose down -v` (this deletes the local data) and start again.
 
@@ -206,11 +205,14 @@ docker run --rm --network spendwise -p 127.0.0.1:8000:8000 \
 - Uvicorn trusts `X-Forwarded-Proto`/`X-Forwarded-For` from `FORWARDED_ALLOW_IPS` (default `*`,
   any address), so requests that reached a proxy over HTTPS are seen as HTTPS. Narrow it to the
   proxy's address if the container can be reached directly by untrusted clients.
-- The image runs with `ENVIRONMENT=production`, so the session cookie is `Secure` (HTTPS only).
+- The image defaults to `APP_ENV=production`, so the session cookie is `Secure` (HTTPS only).
   For plain HTTP on localhost set `SESSION_COOKIE_SECURE=false`, as above; requests that arrive
-  over HTTPS still get a Secure cookie.
-- The image sets `ENVIRONMENT=production` and has no `DATABASE_URL` default: without a PostgreSQL
-  URL it exits at once with an error.
+  over HTTPS still get a Secure cookie. Each deployment sets its own `APP_ENV`
+  ([Environments](docs/environments.md)).
+- The image has no `DATABASE_URL` default: with `APP_ENV` `development` or `production` and no
+  PostgreSQL URL it exits at once with an error.
+- `GET /api/meta` reports `APP_ENV` and the commit in `APP_VERSION` (a full 40-character SHA;
+  unset, the version is `null`). Pass `-e APP_VERSION=<sha>` for the commit you run.
 - The backend serves the frontend only when `FRONTEND_DIST` is set (the image sets it). Client
   routes such as `/transactions` return `index.html`, so a refresh works; unknown `/api/...` paths
   still return JSON 404s.
@@ -224,6 +226,7 @@ docker run --rm --network spendwise -p 127.0.0.1:8000:8000 \
 > Railway was the first intended deployment target because it imports Docker Compose. New
 > Railway account signup was unavailable when SpendWise was deployed, so the managed deployment
 > uses [Render](#deploy-to-render) instead. These steps still apply if Railway is used later.
+> Railway is not one of the two environments ([development and production](docs/environments.md)).
 
 SpendWise deploys to [Railway](https://railway.com) from `compose.yaml`: one `app` service built
 from the `Dockerfile` (UI and API) and one `db` service (`postgres:18`) with a persistent volume.
@@ -272,7 +275,7 @@ public domain use it. No port is ever published for `db`.
    by Railway from the `db` service, so the password is entered only once:
 
    ```
-   ENVIRONMENT=production
+   APP_ENV=production
    PORT=8000
    DATABASE_URL=postgresql://${{db.POSTGRES_USER}}:${{db.POSTGRES_PASSWORD}}@${{db.RAILWAY_PRIVATE_DOMAIN}}:5432/${{db.POSTGRES_DB}}
    SESSION_TTL_DAYS=14
@@ -356,6 +359,10 @@ Railway environment for repeated checks.
 
 ## Deploy to Render
 
+The Render service is **development** ([Environments and promotion](docs/environments.md)): it
+runs every commit on `main` once CI passed, with `APP_ENV=development` and its own database.
+Production is AWS, and changes only through the manual promotion workflow.
+
 [Render](https://render.com) is the managed-platform fallback for Railway (new Railway signup
 was unavailable at deployment time). Render does **not** run Docker Compose: it deploys from
 the `render.yaml` Blueprint at the repository root, which reuses the same production
@@ -376,9 +383,11 @@ after creation; edit `region` in both places first if you need another one):
 
 - `spendwise`: a public web service from this repository's `Dockerfile`, branch `main`.
   `autoDeployTrigger: checksPass` deploys each new commit on `main` after its GitHub checks (the
-  CI workflow) pass. Variables: `ENVIRONMENT=production`, `AI_PROVIDER=fake`,
+  CI workflow) pass. Variables: `APP_ENV=development`, `AI_PROVIDER=fake`,
   `SESSION_TTL_DAYS=14`, `DATABASE_URL` from the database, and `DB_WAIT_TIMEOUT=300` so the
-  first start can wait for the database to finish provisioning. `PORT` is left to Render.
+  first start can wait for the database to finish provisioning. `PORT` is left to Render, and
+  so is the version: `GET /api/meta` reports Render's `RENDER_GIT_COMMIT`. The names
+  `spendwise` and `spendwise-db` must not change, or Render creates new resources.
 - `spendwise-db`: PostgreSQL 18, database and user `spendwise`, password generated by Render.
   `ipAllowList: []` blocks every external connection; only the app (same region) connects,
   through the internal URL.
@@ -425,7 +434,9 @@ backups or preview environments.
    checks below.
 
 Later commits to `main` deploy automatically after CI passes. To change a setting, edit
-`render.yaml` (Render syncs Blueprint changes from `main`) rather than the dashboard.
+`render.yaml` (Render syncs Blueprint changes from `main`) rather than the dashboard. Render
+keeps variables that were removed from the Blueprint: the old `ENVIRONMENT=production` stays on
+the service until you delete it, and the app ignores it.
 
 ### Verify the Render deployment
 
@@ -462,14 +473,16 @@ is no RDS, load balancer, NAT gateway, ECS or autoscaling. The instance uses `co
   Stack creation finishes only when the app is healthy.
 - No secrets in Git: the database password is generated on the instance, and the GitHub deploy
   key lives in SSM Parameter Store.
-- Continuous deployment: every push to `main` that passes CI is deployed as that exact commit,
-  with no AWS access keys or other long-lived secrets. This account is an AWS Free Tier Project,
-  whose Service Control Policy denies `iam:*Provider*`, so AWS can't trust GitHub's OIDC tokens.
-  Instead a deploy gateway on the instance verifies them (signature, exact repository, branch,
-  event, workflow and commit claims, single use). It is reached through Caddy on 443 with no new
-  port, and may only run a root wrapper that deploys the head of `main`. It is not yet installed
-  on the instance. The GitHub OIDC + SSM alternative, for accounts that permit IAM federation, is
-  in the template but off by default, and is untested against AWS here.
+- This is **production** (`APP_ENV=production`). It changes only through the manual
+  **Promote Development to Production** workflow ([Environments](docs/environments.md)), which
+  deploys the exact commit that development runs. No AWS access keys or other long-lived
+  secrets exist. This account is an AWS Free Tier Project, whose Service Control Policy denies
+  `iam:*Provider*`, so AWS can't trust GitHub's OIDC tokens. Instead a deploy gateway on the
+  instance verifies them (signature, exact repository, branch, `workflow_dispatch` event,
+  promotion workflow and commit claims, single use). It is reached through Caddy on 443 with no
+  new port, and may only run a root wrapper that deploys the head of `main`. The GitHub OIDC +
+  SSM alternative, for accounts that permit IAM federation, is in the template but off by
+  default, untested against AWS here, and not wired into the promotion workflow.
 
 [deploy/aws/README.md](deploy/aws/README.md) has the architecture, the free-tier and cost
 details, the security notes and the exact commands. Check the templates locally (no AWS
@@ -500,8 +513,9 @@ the token's SHA-256, so a copy of the `sessions` table cannot be used to sign in
 deletes the session on the server, so a copied cookie stops working too. Each login issues a new
 token and ends the browser's previous session. The cookie is `Secure` for every request that
 arrived over HTTPS (directly or through a proxy that sends `X-Forwarded-Proto: https`) and, for
-plain HTTP, when `ENVIRONMENT=production` unless `SESSION_COOKIE_SECURE=false`. A plain-HTTP
-setting therefore can never weaken an HTTPS deployment.
+plain HTTP, when `APP_ENV` is `development` or `production` unless
+`SESSION_COOKIE_SECURE=false`. A plain-HTTP setting therefore can never weaken an HTTPS
+deployment.
 
 **Cross-site requests.** `SameSite=Lax` keeps the cookie off cross-site `POST`, `PUT`, `PATCH` and
 `DELETE` requests, and JSON bodies are only accepted with `Content-Type: application/json`, which a
@@ -795,8 +809,10 @@ also fails if the page throws an uncaught error or the server answers 5xx.
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs the complete suite on every pull request to `main`, on every
-push to `main`, and on demand (Run workflow). No secrets are used. After a push to `main` passes
-every job, it deploys that commit to AWS (the last two rows below).
+push to `main`, and on demand (Run workflow). No secrets are used. CI deploys nothing: once it
+passes on `main`, Render deploys that commit to development by itself, and production changes
+only through `.github/workflows/promote-production.yml`, run by hand
+([Environments and promotion](docs/environments.md)).
 
 | Job | What it runs | Same thing locally |
 |---|---|---|
@@ -806,8 +822,6 @@ every job, it deploys that commit to AWS (the last two rows below).
 | Integration | builds the image and runs the real Compose stack (PostgreSQL), then the integration suite | `make integration` |
 | End-to-end | builds the image and runs the real Compose stack, then Playwright (Chromium, desktop and phone) | `make e2e` |
 | All checks passed | succeeds only if every job above succeeded | |
-| Deploy to AWS (OIDC deploy gateway) | push to `main` only, after All checks passed, when `AWS_DEPLOY_MODE=oidc-gateway`: sends a GitHub OIDC token to the deploy gateway on the instance (`POST /_deploy`), which verifies it and deploys that commit; polls for the result, then checks `/api/health`, `/api/health/ready` and `/` ([details](deploy/aws/README.md#automatic-deploys-from-github-actions)) | `sudo spendwise-deploy <sha>` on the instance |
-| Deploy to AWS (OIDC + SSM) | the same, when `AWS_DEPLOY_MODE=oidc-ssm` (accounts that allow an IAM OIDC provider): OIDC credentials, SSM Run Command | |
 
 The five test jobs run in parallel; a full run takes roughly as long as the slowest job,
 End-to-end, which builds the image and installs Chromium before the tests. Use "All checks
@@ -835,13 +849,15 @@ Docker image is built from scratch in each job, so a run never depends on a stal
 token in the repository's git config, every action is pinned to a full commit SHA, and no step
 uses repository secrets. Pull requests from forks run with the same read-only token.
 
-Every job runs on GitHub-hosted runners. The deploy jobs never run for pull requests, and only
-they may request an OIDC token (`id-token: write`; the gateway job gets nothing else). The
-deploy gateway accepts only tokens for a push to `main` of this repository by `ci.yml` on a
-GitHub-hosted runner, each once. Deploy settings are repository variables (`AWS_DEPLOY_MODE`,
-`PRODUCTION_URL`, plus `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN`, `AWS_INSTANCE_ID` and
-`AWS_DEPLOY_DOCUMENT` for OIDC). With `AWS_DEPLOY_MODE` unset, nothing is deployed. Protect
-`main` with a required pull request and the "All checks passed" check.
+Every job runs on GitHub-hosted runners. No CI job may request an OIDC token. Only the
+promotion workflow's deploy job may (`id-token: write`, nothing else), and the deploy gateway
+accepts only tokens from a manual run (`workflow_dispatch`) of `promote-production.yml` on
+`main` of this repository, on a GitHub-hosted runner, each once. Before production is touched,
+the promotion checks that CI's push run for that exact commit succeeded, including "All checks
+passed", and that development runs it. Its settings are the repository variables
+`AWS_DEPLOY_MODE` (`oidc-gateway`; anything else and the promotion refuses to run) and
+`PRODUCTION_URL`. Protect `main` with a required pull request and the "All checks passed"
+check.
 
 ## Checks
 

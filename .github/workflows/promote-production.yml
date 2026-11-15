@@ -1,0 +1,319 @@
+name: Promote Development to Production
+
+# Promotes the commit that DEVELOPMENT (Render) runs to PRODUCTION (AWS), by hand only
+# (docs/environments.md): Actions, "Promote Development to Production", Run workflow, branch main.
+#
+#   verify             this run is for the head of main; CI's push run for that exact commit
+#                      succeeded, including "All checks passed"; development reports that commit,
+#                      environment "development", healthy and ready (it may still be deploying it,
+#                      so this waits, at most 30 minutes).
+#   deploy             a GitHub OIDC token to the production deploy gateway, which verifies it (this
+#                      workflow, workflow_dispatch, main, this commit and run, each token once) and
+#                      deploys that exact commit; polls until the deploy has finished.
+#   verify-production  health, readiness, environment "production", the promoted commit, and the
+#                      site itself.
+#
+# Nothing else deploys production: CI (ci.yml) only tests, and the gateway refuses its tokens. No
+# secrets or long-lived credentials; every job runs on a GitHub-hosted runner and requests only
+# the permissions it needs.
+
+run-name: Promote ${{ github.sha }} to production
+
+on:
+  workflow_dispatch:
+
+# Nothing by default; each job lists what it needs.
+permissions: {}
+
+# One promotion at a time, and never cancelled half-way: a second run waits for the first.
+concurrency:
+  group: production-promotion
+  cancel-in-progress: false
+
+env:
+  # The commit this run was started for, never "main": every check below is about this commit,
+  # and the gateway deploys only it. A later push to main cannot slip into this promotion.
+  COMMIT_SHA: ${{ github.sha }}
+  DEVELOPMENT_URL: https://spendwise-amyx.onrender.com
+  PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+
+jobs:
+  verify:
+    name: Verify CI and development
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read # this commit's CI runs and their jobs
+      contents: read # the head of main
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEPLOY_MODE: ${{ vars.AWS_DEPLOY_MODE }}
+    steps:
+      - name: Check the promotion request
+        run: |
+          ok=true
+          fail() { echo "::error::$1"; ok=false; }
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] ||
+            fail "Promotion is started by hand only (this run's event is $GITHUB_EVENT_NAME)"
+          [ "$GITHUB_REF" = refs/heads/main ] ||
+            fail "Promotion runs from main only, and this run is for $GITHUB_REF. Choose main under Run workflow."
+          [ "$GITHUB_REPOSITORY" = allfocusSS/SpendWise ] ||
+            fail "Promotion runs in allfocusSS/SpendWise only"
+          [[ $COMMIT_SHA =~ ^[0-9a-f]{40}$ ]] || fail "Unexpected commit SHA: $COMMIT_SHA"
+          [ "$DEPLOY_MODE" = oidc-gateway ] ||
+            fail "Repository variable AWS_DEPLOY_MODE is '$DEPLOY_MODE'; promotion needs oidc-gateway (docs/environments.md)"
+          [[ $PRODUCTION_URL =~ ^https://[A-Za-z0-9.-]+$ ]] ||
+            fail "Repository variable PRODUCTION_URL is missing or invalid (deploy/aws/README.md)"
+          [ "$PRODUCTION_URL" != "$DEVELOPMENT_URL" ] ||
+            fail "PRODUCTION_URL is the development URL"
+          $ok
+
+      - name: Require main to be at this commit
+        run: |
+          head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$head" != "$COMMIT_SHA" ]; then
+            echo "::error::main is at $head, not $COMMIT_SHA. Only the head of main is promoted: run the workflow again."
+            exit 1
+          fi
+          echo "main is at $COMMIT_SHA"
+
+      # Not just "someone started this workflow": the commit must have passed CI as a push to
+      # main (pull request runs test a merge commit, not this one).
+      - name: Require a successful CI run for this commit
+        run: |
+          runs="$RUNNER_TEMP/ci-runs.json"
+          gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$COMMIT_SHA" -f event=push -f branch=main -f per_page=100 > "$runs"
+          # The newest CI run of a push of exactly this commit to main of this repository. A
+          # re-run updates the same run, so its result is the latest attempt's.
+          run=$(jq -c --arg sha "$COMMIT_SHA" --arg repo "$GITHUB_REPOSITORY" '
+            [.workflow_runs[]
+              | select(.head_sha == $sha and .event == "push" and .head_branch == "main"
+                       and .repository.full_name == $repo and .head_repository.full_name == $repo)]
+            | sort_by(.created_at) | last // empty' "$runs")
+          if [ -z "$run" ]; then
+            echo "::error::No CI run for a push of $COMMIT_SHA to main: only commits that passed CI on main are promoted."
+            exit 1
+          fi
+          id=$(jq -r .id <<< "$run")
+          status=$(jq -r .status <<< "$run")
+          conclusion=$(jq -r '.conclusion // "none"' <<< "$run")
+          url=$(jq -r .html_url <<< "$run")
+          echo "CI run $id: $status, $conclusion ($url)"
+          if [ "$status" != completed ] || [ "$conclusion" != success ]; then
+            echo "::error::CI for $COMMIT_SHA is $status ($conclusion), not a success: $url. Promote it once CI has passed."
+            exit 1
+          fi
+
+          # "All checks passed" fails unless every test job succeeded; it must have succeeded too.
+          jobs="$RUNNER_TEMP/ci-jobs.json"
+          gh api -X GET "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" \
+            -f filter=latest -f per_page=100 > "$jobs"
+          gate=$(jq -r '[.jobs[] | select(.name == "All checks passed") | .conclusion]
+            | if length == 1 then (.[0] // "none") else "missing" end' "$jobs")
+          if [ "$gate" != success ]; then
+            echo "::error::\"All checks passed\" in CI run $id is $gate, not success ($url)"
+            exit 1
+          fi
+          echo "CI passed for $COMMIT_SHA: $url" >> "$GITHUB_STEP_SUMMARY"
+
+      # Render deploys main only after CI passed and then builds the image, and a sleeping free
+      # instance takes about a minute to wake up: wait for it, but at most 30 minutes.
+      - name: Wait for development to run this commit
+        timeout-minutes: 35
+        run: |
+          deadline=$((SECONDS + 1800))
+          while :; do
+            # Once main moves on, development deploys the newer commit instead of this one.
+            head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha 2> /dev/null) || head=""
+            if [ -n "$head" ] && [ "$head" != "$COMMIT_SHA" ]; then
+              echo "::error::main moved on to $head while waiting, so development deploys that instead. Promote the new head of main."
+              exit 1
+            fi
+            meta=$(curl -fsS --max-time 90 "$DEVELOPMENT_URL/api/meta" 2> /dev/null) || meta=""
+            environment=$(jq -r '.environment // empty' <<< "$meta" 2> /dev/null) || environment=""
+            version=$(jq -r '.version // empty' <<< "$meta" 2> /dev/null) || version=""
+            echo "development: ${environment:-no answer}, version ${version:-none} (${SECONDS}s)"
+            if [ -n "$environment" ] && [ "$environment" != development ]; then
+              echo "::error::$DEVELOPMENT_URL reports environment '$environment', not development (APP_ENV in render.yaml)"
+              exit 1
+            fi
+            if [ "$version" = "$COMMIT_SHA" ]; then
+              break
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::Development did not report $COMMIT_SHA within 30 minutes (it reports ${version:-no version}). Check its deploy on Render, then run the promotion again."
+              exit 1
+            fi
+            sleep 30
+          done
+
+      - name: Verify development health and readiness
+        run: |
+          get() { curl -fsS --max-time 60 --retry 5 --retry-delay 10 --retry-all-errors "$DEVELOPMENT_URL$1"; }
+          for path in /api/health /api/health/ready; do
+            echo "GET $DEVELOPMENT_URL$path"
+            if ! body=$(get "$path") || [ "$(jq -r .status <<< "$body" 2> /dev/null)" != ok ]; then
+              echo "::error::$DEVELOPMENT_URL$path is not ok: ${body:-no answer}"
+              exit 1
+            fi
+            echo "$body"
+          done
+          # Still this commit, in development, after those checks.
+          if ! meta=$(get /api/meta) ||
+            [ "$(jq -r .environment <<< "$meta" 2> /dev/null)" != development ] ||
+            [ "$(jq -r .version <<< "$meta" 2> /dev/null)" != "$COMMIT_SHA" ]; then
+            echo "::error::Development no longer reports environment development and version $COMMIT_SHA: ${meta:-no answer}"
+            exit 1
+          fi
+          echo "$meta"
+          echo "Development ($DEVELOPMENT_URL) runs $COMMIT_SHA, healthy and ready." >> "$GITHUB_STEP_SUMMARY"
+
+  # The production deploy gateway (deploy/aws/gateway/) on the instance verifies the token's
+  # signature and claims (this repository by ID, main, workflow_dispatch, promote-production.yml,
+  # a GitHub-hosted runner, this commit and run), accepts each token once, and deploys this exact
+  # commit if it is still the head of main. No AWS credentials, no secrets, nothing checked out.
+  deploy:
+    name: Deploy to production (OIDC deploy gateway)
+    needs: [verify]
+    runs-on: ubuntu-latest
+    # The deploy builds the image on a micro instance: up to 50 minutes (the wrapper's limit).
+    timeout-minutes: 65
+    permissions:
+      id-token: write # the OIDC token for the gateway; no other permission (contents: none)
+    env:
+      # The gateway accepts tokens for this audience only (DEPLOY_GATEWAY_AUDIENCE in
+      # deploy/aws/gateway/deploy-gateway.env).
+      DEPLOY_AUDIENCE: spendwise-deploy
+    steps:
+      - name: Check the deployment settings
+        run: |
+          if ! [[ $PRODUCTION_URL =~ ^https://[A-Za-z0-9.-]+$ ]]; then
+            echo "::error::Repository variable PRODUCTION_URL is missing or invalid (deploy/aws/README.md)"
+            exit 1
+          fi
+          if ! [[ $COMMIT_SHA =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unexpected commit SHA: $COMMIT_SHA"
+            exit 1
+          fi
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "::error::No OIDC token available (the job needs permissions: id-token: write)"
+            exit 1
+          fi
+
+      # Checked again right before production changes (and by the instance itself, which deploys
+      # nothing but the head of main).
+      - name: Require main to still be at this commit
+        run: |
+          head=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)
+          if [ "$head" != "$COMMIT_SHA" ]; then
+            echo "::error::main moved on to $head; production was not changed. Promote the new head of main."
+            exit 1
+          fi
+
+      # The first request starts the deploy; later ones (same run) return its status. Every
+      # request has a fresh OIDC token, since the gateway accepts each token once. Tokens are
+      # masked, and passed to curl on stdin only (never on a command line, never in a file).
+      - name: Deploy the commit through the deploy gateway
+        timeout-minutes: 60
+        run: |
+          body=$(jq -cn --arg sha "$COMMIT_SHA" --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{sha: $sha, run_id: $run_id, run_attempt: $run_attempt}')
+          answer="$RUNNER_TEMP/gateway.json"
+
+          # Sets $code (the HTTP status, 000 without an answer) and writes the answer to $answer.
+          # Not called in a command substitution, so the ::add-mask:: line reaches the runner.
+          request_deploy() {
+            local token
+            code=000
+            : > "$answer"
+            token=$(printf 'Authorization: bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" |
+              curl -fsS --max-time 20 --retry 3 --retry-all-errors -H @- \
+                "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$DEPLOY_AUDIENCE" | jq -r '.value // empty') || return 0
+            [ -n "$token" ] || return 0
+            echo "::add-mask::$token"
+            code=$(printf 'Authorization: Bearer %s\n' "$token" |
+              curl -sS --max-time 30 -H @- -H 'Content-Type: application/json' \
+                --data "$body" -o "$answer" -w '%{http_code}' "$PRODUCTION_URL/_deploy") || code=000
+          }
+
+          # Bounded: the wrapper stops spendwise-deploy after 50 minutes. Transient failures
+          # (Caddy restarting during the deploy, the gateway briefly unavailable) are retried
+          # at most 15 times in a row.
+          deadline=$((SECONDS + 3300))
+          transient=0
+          while :; do
+            request_deploy
+            status=$(jq -r '.status // empty' "$answer" 2> /dev/null || true)
+            echo "HTTP $code: ${status:-no answer} (${SECONDS}s)"
+            case "$code:$status" in
+              200:success)
+                break ;;
+              200:superseded)
+                echo "::error::$COMMIT_SHA is no longer the head of main, so the instance refused it; production was not changed. Promote the new head of main."
+                exit 1 ;;
+              202:running)
+                transient=0 ;;
+              000:* | 502:* | 503:* | 504:*)
+                transient=$((transient + 1))
+                if [ "$transient" -ge 15 ]; then
+                  echo "::error::The deploy gateway did not answer ($PRODUCTION_URL/_deploy)"
+                  exit 1
+                fi ;;
+              *)
+                jq . "$answer" 2> /dev/null || true
+                echo "::error::The deploy gateway reported ${status:-HTTP $code} (deploy/aws/README.md, Troubleshooting)"
+                exit 1 ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::The deploy did not finish in time"
+              exit 1
+            fi
+            sleep 20
+          done
+          jq . "$answer"
+
+  verify-production:
+    name: Verify production
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Verify production health, environment and version
+        run: |
+          # Bounded retries: Caddy may still be starting after the containers were replaced.
+          get() { curl -fsS --max-time 10 --retry 12 --retry-delay 5 --retry-all-errors "$PRODUCTION_URL$1"; }
+          for path in /api/health /api/health/ready; do
+            echo "GET $PRODUCTION_URL$path"
+            if ! body=$(get "$path") || [ "$(jq -r .status <<< "$body" 2> /dev/null)" != ok ]; then
+              echo "::error::$PRODUCTION_URL$path is not ok: ${body:-no answer}"
+              exit 1
+            fi
+            echo "$body"
+          done
+
+          echo "GET $PRODUCTION_URL/api/meta"
+          if ! meta=$(get /api/meta); then
+            echo "::error::$PRODUCTION_URL/api/meta did not answer"
+            exit 1
+          fi
+          echo "$meta"
+          environment=$(jq -r '.environment // empty' <<< "$meta" 2> /dev/null) || environment=""
+          version=$(jq -r '.version // empty' <<< "$meta" 2> /dev/null) || version=""
+          if [ "$environment" != production ]; then
+            echo "::error::$PRODUCTION_URL reports environment '${environment:-none}', not production"
+            exit 1
+          fi
+          if [ "$version" != "$COMMIT_SHA" ]; then
+            echo "::error::$PRODUCTION_URL runs ${version:-an unknown version}, not the promoted $COMMIT_SHA"
+            exit 1
+          fi
+
+          echo "GET $PRODUCTION_URL/"
+          if ! root=$(get /) || ! grep -q '<div id="root">' <<< "$root"; then
+            echo "::error::$PRODUCTION_URL/ does not serve the app"
+            exit 1
+          fi
+          echo "Promoted $COMMIT_SHA from development to production ($PRODUCTION_URL)." >> "$GITHUB_STEP_SUMMARY"

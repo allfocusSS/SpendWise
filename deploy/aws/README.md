@@ -4,6 +4,10 @@ A small, free-tier-sized AWS deployment for SpendWise: **one EC2 instance runnin
 Compose stack as local development**, described in CloudFormation so it can be created and
 deleted reproducibly.
 
+This instance is **production** (`APP_ENV=production`, <https://54.79.77.189.nip.io>).
+Development is the Render service. Production changes only when someone runs the **Promote
+Development to Production** workflow ([Environments and promotion](../../docs/environments.md)).
+
 ```
 GitHub (this repository, read with a deploy key)
         │  git fetch, docker compose build
@@ -26,9 +30,9 @@ EBS data volume (encrypted, retained) at /srv/spendwise
 |---|---|
 | `budget.yaml` | A monthly AWS Budget with email alerts. Deploy it **first**. |
 | `spendwise-stack.yaml` | The network, security group, IAM roles, data volume, Elastic IP and instance, and the GitHub Actions deploy role. |
-| `compose.aws.yaml` | EC2 additions to `compose.yaml`: Caddy and the database on the data volume. |
+| `compose.aws.yaml` | EC2 additions to `compose.yaml`: `APP_ENV=production`, Caddy, and the database on the data volume. |
 | `Caddyfile` | HTTPS and the reverse proxy, plus the `POST /_deploy` route to the deploy gateway. |
-| `gateway/` | The deploy gateway (Mode B of [Automatic deploys](#automatic-deploys-from-github-actions)): the program, its installer, systemd units, root wrapper and sudo rule. |
+| `gateway/` | The deploy gateway (Mode B of [Production deploys](#production-deploys-from-github-actions-manual-promotion)): the program, its installer, systemd units, root wrapper and sudo rule. |
 
 Nothing in these files is secret. The database password is generated on the instance at first
 boot. The GitHub deploy key is stored in SSM Parameter Store, which you do yourself.
@@ -52,7 +56,7 @@ never exposed to the network.
 | Data volume | 8 GiB gp3, encrypted, **retained** when the stack is deleted | free tier / credits |
 | Elastic IP | stable public IPv4, released when the stack is deleted | see below |
 | Wait condition `AppReady` | stack creation finishes only when the first deploy is healthy | free |
-| GitHub OIDC provider (Mode A only) | `token.actions.githubusercontent.com`, audience `sts.amazonaws.com`, or an existing one. **Not created by default**: AWS Free Tier Projects deny `iam:*Provider*` (see [Automatic deploys](#automatic-deploys-from-github-actions)) | free |
+| GitHub OIDC provider (Mode A only) | `token.actions.githubusercontent.com`, audience `sts.amazonaws.com`, or an existing one. **Not created by default**: AWS Free Tier Projects deny `iam:*Provider*` (see [Production deploys](#production-deploys-from-github-actions-manual-promotion)) | free |
 | SSM document `<stack>-deploy` (Mode A only) | runs `spendwise-deploy <commit SHA>` and nothing else | free |
 | IAM role `GitHubDeployRole` (Mode A only) | assumable only by GitHub Actions on `main` of this repository; may only run that document on this instance | free |
 
@@ -115,8 +119,9 @@ email alerts are all free.
   instance's credentials.
 - **Outbound traffic:** TCP 80 and 443 only. Git over SSH uses `ssh.github.com:443`, with
   GitHub's published host keys pinned.
-- **Deploys from GitHub Actions:** no AWS access keys or other long-lived secrets exist (see
-  [Automatic deploys](#automatic-deploys-from-github-actions)).
+- **Deploys from GitHub Actions:** only the manual promotion workflow deploys this instance, and
+  no AWS access keys or other long-lived secrets exist (see
+  [Production deploys](#production-deploys-from-github-actions-manual-promotion)).
   - In this account (Mode B), a GitHub-hosted job sends a GitHub OIDC token to the deploy
     gateway on the instance, through Caddy on 443 (no new port). The gateway verifies the
     token's signature and exact claims, accepts each token once, and runs as an unprivileged
@@ -259,8 +264,10 @@ $c logs --tail 100 app    # application log (caddy: certificates)
 ```
 
 - **Deploys** happen on the instance (`spendwise-deploy`), not through stack updates: the
-  first-boot script runs only once. Every push to `main` that passes CI is deployed
-  automatically (next section); `spendwise-deploy` by hand is for anything else.
+  first-boot script runs only once. Production changes through the manual promotion workflow
+  (next section); `spendwise-deploy` by hand is for emergencies
+  ([Rollback](../../docs/environments.md#rollback)). `curl -s https://<site>/api/meta` shows
+  which commit runs.
 - **Backups.** The free tier has no automatic backups. Take a dump and copy it off the instance:
 
   ```bash
@@ -273,34 +280,42 @@ $c logs --tail 100 app    # application log (caddy: certificates)
 - **Stopping the instance** stops instance-hour charges. The volumes and the Elastic IP are
   still billed (or still count against the free tier).
 
-## Automatic deploys from GitHub Actions
+## Production deploys from GitHub Actions (manual promotion)
 
-Every push to `main` that passes the whole CI suite is deployed to the instance as that exact
-commit (`github.sha`, never `main`). No AWS access key, GitHub token or other long-lived secret
-exists anywhere, and every job runs on a GitHub-hosted runner. There are two ways to do it. The
-repository variable `AWS_DEPLOY_MODE` chooses the workflow job, and the stack parameter
-`GitHubDeployMode` chooses the AWS resources:
+A push to `main` no longer deploys this instance: CI only tests, and Render deploys development.
+Production changes when someone runs **Promote Development to Production**
+(`.github/workflows/promote-production.yml`) by hand on `main`. The workflow checks that CI passed
+for the head of `main` and that development runs that commit, healthy, and then deploys that
+exact commit (`github.sha`, never `main`) here
+([Environments and promotion](../../docs/environments.md)). No AWS access key, GitHub token or
+other long-lived secret exists anywhere, and every job runs on a GitHub-hosted runner.
+
+There are two ways for GitHub to reach the instance. The repository variable `AWS_DEPLOY_MODE`
+chooses one, and the stack parameter `GitHubDeployMode` chooses the AWS resources. The
+promotion workflow implements Mode B, the one this account uses:
 
 | | Mode B: GitHub OIDC → SpendWise deploy gateway | Mode A: GitHub OIDC → AWS IAM → SSM |
 |---|---|---|
 | For | **AWS Free Tier Projects (this account)**, whose SCP blocks `iam:*Provider*` | AWS accounts that permit IAM federation |
 | `GitHubDeployMode` (stack) | `oidc-gateway` (the default) | `oidc-ssm` |
 | `AWS_DEPLOY_MODE` (GitHub) | `oidc-gateway` | `oidc-ssm` |
-| Workflow job | `deploy-aws`, GitHub-hosted | `deploy-aws-oidc`, GitHub-hosted |
+| Workflow job | `deploy` in `promote-production.yml`, GitHub-hosted | none any more (it was `deploy-aws-oidc` in `ci.yml`) |
 | Who checks GitHub's token | the gateway on the instance (`deploy/aws/gateway/`) | AWS STS, through an IAM OIDC provider |
 | AWS credentials used | none | one-hour role credentials |
 | AWS resources for deploys | none | OIDC provider, deploy role, SSM document |
 | How the instance is reached | `POST https://<site>/_deploy`, through Caddy on 443 | SSM Run Command |
 
-With `AWS_DEPLOY_MODE` unset, neither job runs and nothing is deployed. Pull requests never
-deploy in either mode.
+With `AWS_DEPLOY_MODE` anything but `oidc-gateway`, the promotion workflow refuses to run.
+Pushes and pull requests never deploy production in either mode.
 
-> **Status (Issue #11).** Mode B is implemented and tested locally (token verification against
-> locally generated keys, the host files on Amazon Linux 2023, Caddy's routing), but it has
-> **not yet been installed on the instance, and no GitHub Actions deploy has run through it.**
-> That needs the one-time installation below and a first real push to `main`. Mode A is
-> implemented and its static tests pass, but it has **not** been tested against AWS: the SCP
-> described below makes that impossible in this account.
+> **Status.** Mode B is installed on the instance and verified with real deploys from GitHub
+> Actions ([verification note](../../docs/aws-oidc-deployment-verification.md)), first from
+> `ci.yml` on every push to `main`. It now trusts the promotion workflow instead. The gateway on
+> the instance keeps the old trust until it is reinstalled once
+> ([Switching to manual promotion](../../docs/environments.md#switching-to-manual-promotion-once)).
+> Mode A is implemented in the template and its static tests pass, but it has **not** been
+> tested against AWS (the SCP described below makes that impossible in this account), and no
+> workflow uses it any more.
 
 ### Why this account can't use AWS IAM OIDC
 
@@ -335,26 +350,28 @@ check that token here, a small service on the instance does: the **deploy gatewa
 part of the SpendWise app or its login, and it shares nothing with them.
 
 ```
-push to main
-  └─ CI on GitHub-hosted runners: backend, backend-postgres, frontend, integration, e2e
-       └─ "All checks passed"
-            └─ deploy-aws (push to main of allfocusSS/SpendWise only; GitHub-hosted runner)
-                 permissions: id-token: write (nothing else)
-                 ├─ skip if main has moved on (git ls-remote)
-                 ├─ OIDC token from GitHub, audience "spendwise-deploy" (masked, stdin only)
-                 ├─ POST https://<site>/_deploy  {"sha", "run_id", "run_attempt"}
-                 │    Caddy :443 ─► Unix socket ─► spendwise-deploy-gateway (no network port)
-                 │       ├─ RS256 signature with GitHub's published keys; exp, nbf, iat, iss, aud
-                 │       ├─ exact claims: repository + IDs, main, push, ci.yml, GitHub-hosted,
-                 │       │  sha / run_id / run_attempt equal to the body
-                 │       ├─ token ID (jti) not used before (SQLite)
-                 │       ├─ no other deploy running ─► 202 "running"
-                 │       └─ in the background: sudo -n /usr/local/sbin/spendwise-deploy-sha <sha>
-                 │            └─ as root: deploy lock, head of main?, then
-                 │               spendwise-deploy <sha> (fetch, build, compose up --wait), ≤ 50 min
-                 │            then GET https://<site>/api/health/ready
-                 ├─ every 20 s: POST again with a fresh token ─► "running" … "success"
-                 └─ GET <PRODUCTION_URL>/api/health, /api/health/ready and / (bounded retries)
+merge to main ─► CI (ci.yml, tests only) ─► Render deploys development
+by hand: Actions ► Promote Development to Production ► Run workflow (main)
+  └─ verify (GitHub-hosted; actions: read, contents: read)
+  │    ├─ head of main == github.sha; CI's push run for it succeeded, "All checks passed" too
+  │    └─ development reports that SHA, environment development, health and ready ok
+  └─ deploy (GitHub-hosted; permissions: id-token: write, nothing else)
+  │    ├─ main still at that SHA (git ls-remote)
+  │    ├─ OIDC token from GitHub, audience "spendwise-deploy" (masked, stdin only)
+  │    ├─ POST https://<site>/_deploy  {"sha", "run_id", "run_attempt"}
+  │    │    Caddy :443 ─► Unix socket ─► spendwise-deploy-gateway (no network port)
+  │    │       ├─ RS256 signature with GitHub's published keys; exp, nbf, iat, iss, aud
+  │    │       ├─ exact claims: repository + IDs, main, workflow_dispatch,
+  │    │       │  promote-production.yml, GitHub-hosted, sha / run_id / run_attempt = the body
+  │    │       ├─ token ID (jti) not used before (SQLite)
+  │    │       ├─ no other deploy running ─► 202 "running"
+  │    │       └─ in the background: sudo -n /usr/local/sbin/spendwise-deploy-sha <sha>
+  │    │            └─ as root: deploy lock, head of main?, APP_VERSION=<sha>, then
+  │    │               spendwise-deploy <sha> (fetch, build, compose up --wait), ≤ 50 min
+  │    │            then GET https://<site>/api/health/ready
+  │    └─ every 20 s: POST again with a fresh token ─► "running" … "success"
+  └─ verify-production (GitHub-hosted; no permissions)
+       └─ /api/health, /api/health/ready; /api/meta = production + <sha>; / (bounded retries)
 ```
 
 **Why start-then-poll rather than one long request:** building the image on a micro instance
@@ -383,17 +400,19 @@ gh api repos/allfocusSS/SpendWise/actions/oidc/customization/sub        # use_im
 | `repository_id` | `1441102769` |
 | `repository_owner_id` | `189591398` |
 | `ref` / `ref_type` | `refs/heads/main` / `branch` |
-| `event_name` | `push` |
+| `event_name` | `workflow_dispatch` (fixed in the program, not a setting) |
 | `runner_environment` | `github-hosted` |
-| `workflow_ref` | `allfocusSS/SpendWise/.github/workflows/ci.yml@refs/heads/main` |
+| `workflow_ref` | `allfocusSS/SpendWise/.github/workflows/promote-production.yml@refs/heads/main` |
 | `sha`, `run_id`, `run_attempt` | equal to the request body's `sha`, `run_id`, `run_attempt` |
 | `jti` | present, not empty, never used before |
 | `exp`, `nbf`, `iat` | present and valid, with 60 s of clock skew; `iat` within the last 10 minutes |
 
 The repository name alone never authorizes anything: a renamed, transferred or re-created
-repository has another ID. Pull requests (`event_name`, `ref` and `sub` differ), tags, other
-branches, forks (another repository ID), other workflows, `workflow_dispatch` runs and tokens
-from self-hosted runners are all refused, even if a pull request edits the workflow file.
+repository has another ID. Pushes (CI's `ci.yml` tokens included: `event_name` and
+`workflow_ref` differ), pull requests (`event_name`, `ref` and `sub` differ), tags, runs on
+other branches, forks (another repository ID), other workflows, jobs with a GitHub environment
+(another `sub`) and tokens from self-hosted runners are all refused, even if a pull request
+edits the workflow file.
 
 #### How the token is verified
 
@@ -433,6 +452,9 @@ after the token expired. A replayed token gets `409 replay_rejected`.
   and again by the wrapper.
 - The wrapper refuses a SHA that isn't the current head of `main` (`superseded`), so an old
   run can't roll production back.
+- The wrapper exports `APP_VERSION=<sha>` for `spendwise-deploy`, and `compose.yaml` passes it
+  to the app, so `GET /api/meta` reports exactly the deployed commit. The promotion fails unless
+  it does.
 
 #### One deploy at a time, and bounded
 
@@ -440,7 +462,8 @@ after the token expired. A replayed token gets `409 replay_rejected`.
   run gets `409 busy`.
 - The root wrapper also takes a host lock, `flock` on `/run/spendwise-deploy.lock`, and exits
   with `busy` if it's held. A manual deploy through the wrapper takes the same lock.
-- The workflow's `concurrency: deploy-aws-production` serializes the jobs as well.
+- The workflow's `concurrency: production-promotion` serializes promotions as well, and never
+  cancels a running one.
 - The wrapper stops `spendwise-deploy` after 50 minutes (`timeout`, then `KILL` a minute
   later). The gateway has its own backstop a minute after that.
 - The workflow polls for at most 55 minutes, and its job times out after 65.
@@ -465,7 +488,7 @@ token, its claims or the deploy's output.
 | 200 | `deploy_failed` | `spendwise-deploy` failed, or didn't report this SHA. |
 | 200 | `health_failed` | Deployed, but `/api/health/ready` didn't answer 200. |
 | 200 | `timeout` | Stopped after 50 minutes. |
-| 200 | `superseded` | Not the head of `main` any more; the newer run deploys (the job ends without error). |
+| 200 | `superseded` | Not the head of `main` any more; nothing was deployed, and the promotion fails. |
 | 200 | `busy` / `interrupted` | The host lock was held, or the gateway restarted mid-deploy. |
 | 400 | `invalid_sha` / `invalid_request` | Malformed body. |
 | 401 | `unauthorized` | Any token problem. The reason is only in the gateway's journal. |
@@ -473,8 +496,8 @@ token, its claims or the deploy's output.
 | 409 | `replay_rejected` / `busy` | Token already used / another run's deploy is running. |
 | 503 | `unavailable` | GitHub's keys couldn't be fetched (fails closed). |
 
-The job fails on anything but `success` (or `superseded`). It retries only transport failures,
-502, 503 and 504, at most 15 times in a row; Caddy itself may restart during a deploy.
+The job fails on anything but `success`. It retries only transport failures, 502, 503 and 504,
+at most 15 times in a row; Caddy itself may restart during a deploy.
 
 #### Network isolation
 
@@ -525,7 +548,8 @@ The checks above provide the user's isolation instead.
 
 | Threat | What stops it |
 |---|---|
-| Anyone on the internet calls `/_deploy` | Without a valid GitHub-signed token for this repository's `main` push, the answer is `401` and nothing runs. Unknown key IDs refresh GitHub's keys at most once a minute. |
+| Anyone on the internet calls `/_deploy` | Without a valid GitHub-signed token from a manual run of this repository's promotion workflow on `main`, the answer is `401` and nothing runs. Unknown key IDs refresh GitHub's keys at most once a minute. |
+| A push to `main` (CI) tries to deploy production | CI has no `id-token` permission, and a push token says `push` and `ci.yml`: refused. |
 | A pull request, including one from a fork, edits the workflow to get a token | Its token says `pull_request`, another `ref` and `sub`, and for a fork another repository ID: refused. |
 | Another repository, workflow or job asks for audience `spendwise-deploy` | Repository, IDs, `sub` and `workflow_ref` must all match exactly. |
 | A runner someone else controls | `runner_environment` must be `github-hosted`. |
@@ -537,8 +561,8 @@ The checks above provide the user's isolation instead.
 | Floods and oversized requests | Bodies over 4 KB are dropped by Caddy (and over 1 KiB by the gateway); connections time out after 15 s; one deploy at a time. |
 
 What remains:
-- **Anyone who can push to `main` decides what gets deployed.** That is the intended trust;
-  branch protection is what limits it.
+- **Anyone with write access can promote**, but only the head of `main`, after it passed CI and
+  runs in development. Branch protection limits what reaches `main`.
 - **GitHub is trusted** as the token issuer.
 - **The gateway is reachable from the internet** through Caddy. That's the price of running no
   inbound tunnel, and it's why every request is authenticated.
@@ -597,9 +621,13 @@ production app keeps running throughout.
    gh variable set PRODUCTION_URL  --body https://54.79.77.189.nip.io   # SiteUrl output, no trailing slash
    ```
 
-7. **The first real deploy** is the next push to `main`. Watch the job, and on the instance
-   `sudo journalctl -fu spendwise-deploy-gateway`. Only after it succeeds is Mode B verified in
-   production.
+7. **The first real deploy** is a promotion (Actions, Promote Development to Production). Watch
+   the run, and on the instance `sudo journalctl -fu spendwise-deploy-gateway`. Only after it
+   succeeds is Mode B verified in production.
+
+An instance whose gateway still trusts `ci.yml` (installed before manual promotion) needs the
+installer run once more from a newer checkout:
+[Switching to manual promotion](../../docs/environments.md#switching-to-manual-promotion-once).
 
 Re-running the installer is safe (it reinstalls every file). It refuses to restart the gateway
 while a deploy holds the lock.
@@ -659,18 +687,19 @@ rule (such as the old runner's) still mentions the wrapper.
 
 | Symptom | Where to look |
 |---|---|
-| The job reports `unauthorized` | `sudo journalctl -u spendwise-deploy-gateway` names the failing check (e.g. `claim workflow_ref does not match`). The repository was renamed or transferred (new IDs), `ci.yml` was renamed, or the OIDC subject customization changed. Compare with `deploy-gateway.env` and re-run the installer after updating it. |
+| The job reports `unauthorized` | `sudo journalctl -u spendwise-deploy-gateway` names the failing check (e.g. `claim workflow_ref does not match`). The installed settings still trust `ci.yml` (`grep WORKFLOW /etc/spendwise/deploy-gateway.env`: re-run the installer from a current checkout), the run wasn't a manual run on `main`, `promote-production.yml` was renamed, the repository was renamed or transferred (new IDs), or the OIDC subject customization changed. Compare with `deploy-gateway.env` and re-run the installer after updating it. |
 | `unavailable` (503) | The gateway can't fetch GitHub's keys. Run the installer's `--check` line by hand, and check outbound HTTPS. |
 | No answer, or 502 from Caddy, for a long time | `systemctl status spendwise-deploy-gateway`; `sudo ls -la /run/spendwise-deploy-gateway` (socket present?). If Caddy started before the directory existed, recreate it: `$c up -d --force-recreate caddy` (see [Operating it](#operating-it)). |
 | `busy` | A deploy holds the lock: `sudo flock -n /run/spendwise-deploy.lock true || echo held`. Wait for it, then re-run the job. |
 | `deploy_failed`, `timeout` or `health_failed` | `sudo ls -t /var/lib/spendwise-deploy-gateway/logs/` and the newest `deploy-<run>-<attempt>.log`; `$c ps`; `$c logs --tail 100 app`. The health check is made from the instance to its own public URL. |
-| `interrupted` | The gateway restarted mid-deploy. Re-run the job: a new attempt is a new deploy. |
+| `interrupted` | The gateway restarted mid-deploy. Re-run the failed job: a new attempt is a new deploy. |
+| `superseded` | `main` moved on before the instance started the deploy. Promote the new head of `main`. |
 | `replay_rejected` | A token was sent twice, which the workflow never does. Check for a modified workflow. |
 
 #### Removing the gateway
 
 ```bash
-gh variable delete AWS_DEPLOY_MODE                       # on your machine: pause deploys first
+gh variable delete AWS_DEPLOY_MODE                       # on your machine: promotion then refuses to run
 # On the instance
 sudo systemctl disable --now spendwise-deploy-gateway.service spendwise-deploy-gateway-no-imds.service
 sudo rm -f /etc/systemd/system/spendwise-deploy-gateway{,-no-imds}.service \
@@ -687,11 +716,17 @@ site is unaffected.
 ### Mode A: GitHub OIDC and SSM (AWS accounts that permit federation)
 
 For an account without the Free Tier Project SCP. This is the standard production
-recommendation: nothing on the instance accepts requests from GitHub. The `deploy-aws-oidc` job
-gets one-hour credentials from GitHub's OIDC token and runs the deploy through SSM Run Command.
+recommendation: nothing on the instance accepts requests from GitHub. A deploy job gets
+one-hour credentials from GitHub's OIDC token and runs the deploy through SSM Run Command.
+
+> **Not wired into promotion.** This was `ci.yml`'s `deploy-aws-oidc` job, which deployed every
+> push to `main`; it was removed when production deploys became manual. The stack resources
+> below still exist for such accounts. Using them needs a deploy job like this one in
+> `promote-production.yml`, and the role's trust (`sub` only) then accepts any workflow on
+> `main`, not just the promotion workflow.
 
 ```
-push to main
+(formerly) push to main
   └─ CI ─► "All checks passed"
        └─ deploy-aws-oidc (push to main only; GitHub-hosted runner)
             ├─ GitHub OIDC token: aud sts.amazonaws.com,
@@ -709,7 +744,7 @@ An access key in GitHub Secrets would be long-lived: it works from anywhere unti
 rotates it, and any workflow that can read the secret can use it. With OIDC, GitHub signs a token
 for each job that describes which repository, branch and event it runs for. AWS STS exchanges it
 for credentials that expire after one hour, and only if the role's trust policy accepts it. Only
-the two deploy jobs get `id-token: write`. Every other job keeps the read-only token.
+a deploy job gets `id-token: write`. Every other job keeps the read-only token.
 
 #### Who can assume the role
 
@@ -735,9 +770,9 @@ gh api repos/allfocusSS/SpendWise --jq '{repo_id: .id, owner_id: .owner.id}'
 The IDs and branch are stack parameters (`GitHubOwnerId`, `GitHubRepositoryId`,
 `GitHubDeployBranch`). Any other subject is refused: other repositories and forks, other branches
 and tags, `pull_request` runs, and jobs that use a GitHub environment
-(`...:environment:<name>`). That's why `deploy-aws-oidc` has no `environment:`.
+(`...:environment:<name>`). That's why no deploy job uses `environment:`.
 
-Anyone who can push to `main` can trigger a deploy, so protect `main` (see [GitHub settings](#github-settings-for-both-modes)).
+Any workflow on `main` can assume the role, so protect `main` (see [GitHub settings](#github-settings-for-both-modes)).
 
 #### What the role can do
 
@@ -809,7 +844,7 @@ IAM or Session Manager permissions, no SSH, no `AdministratorAccess` and no mana
 
 | Variable | Mode | Value |
 |---|---|---|
-| `AWS_DEPLOY_MODE` | both | `oidc-gateway` (this account) or `oidc-ssm`; unset disables deploys |
+| `AWS_DEPLOY_MODE` | both | `oidc-gateway` (this account; the promotion workflow refuses any other value, or none) or `oidc-ssm` |
 | `PRODUCTION_URL` | both | `SiteUrl` output, no trailing slash, e.g. `https://54.79.77.189.nip.io`. In Mode B the deploy endpoint is derived from it: `<PRODUCTION_URL>/_deploy` |
 | `AWS_REGION` | A | the stack's region |
 | `AWS_DEPLOY_ROLE_ARN` | A | output `GitHubDeployRoleArn` |
@@ -820,33 +855,39 @@ Mode B needs no secret and no other variable. Its OIDC audience, `spendwise-depl
 the workflow and in `deploy/aws/gateway/deploy-gateway.env` (a test checks they match), because
 changing it on one side only would just break deploys.
 
-### How a deploy runs (both modes)
+### How a promotion runs
 
-- **Trigger:** a push to `main` (including a merged pull request), after every CI job passed.
-  Pull requests, other branches and manual runs never deploy.
-- **The tested commit only:** the job deploys `github.sha`, never `main`. `spendwise-deploy` must
-  report deploying that exact SHA (checked by the gateway in Mode B, by the job in Mode A).
-- **Newest commit wins:** if `main` has moved on by the time CI finishes, the job skips (with a
-  notice) and the newer run deploys instead. In Mode B the wrapper refuses anything but the head
-  of `main` as well. Deploys never overlap and are never cancelled half-way
-  (`concurrency: deploy-aws-production`, plus the gateway's and the host's locks in Mode B).
-- **Bounded:** in Mode B the wrapper stops a deploy after 50 minutes and the job polls for at
-  most 55. Mode A polls SSM every 15 seconds for at most about 53 minutes. Health checks retry a
-  fixed number of times.
-- **Failures:** the job fails if the deploy fails (the stack didn't become healthy), if it runs
-  out of time, or if `/api/health`, `/api/health/ready` or `/` doesn't answer afterwards. In
-  Mode B only the status reaches the job log; the instance's output stays on the instance
-  (`/var/lib/spendwise-deploy-gateway/logs/`). In Mode A, SSM returns at most 24,000 characters
-  of it to the job log.
+- **Trigger:** only a manual run of **Promote Development to Production** on `main`
+  ([how](../../docs/environments.md#promoting)). Pushes, pull requests and CI never deploy
+  production.
+- **Before production is touched:** the run is for the head of `main`; CI's push run for that
+  commit completed successfully, including "All checks passed"; development reports that commit
+  (`GET /api/meta`, environment `development`), healthy and ready. It waits for development for
+  at most 30 minutes.
+- **The verified commit only:** the job deploys `github.sha`, never `main`. `spendwise-deploy`
+  must report deploying that exact SHA (checked by the gateway), and the app must report it as
+  its version afterwards.
+- **Newest commit only:** if `main` moves on during the run, the promotion fails before
+  production changes (the workflow checks, and the wrapper refuses anything but the head of
+  `main`). Promotions never overlap and are never cancelled half-way
+  (`concurrency: production-promotion`, plus the gateway's and the host's locks).
+- **Bounded:** the wrapper stops a deploy after 50 minutes and the job polls for at most 55.
+  Health checks retry a fixed number of times.
+- **Failures:** the promotion fails if the deploy fails (the stack didn't become healthy), if it
+  runs out of time, or if `/api/health`, `/api/health/ready`, `/api/meta` (environment
+  `production`, the promoted SHA) or `/` don't answer as expected afterwards. Only the status
+  reaches the job log; the instance's output stays on the instance
+  (`/var/lib/spendwise-deploy-gateway/logs/`).
 - A failed deploy leaves the previous containers running, unless the new ones had already
   replaced them (`docker compose up --wait` then reports them unhealthy).
 
 ### Checking it by hand
 
 ```bash
-gh run list --workflow ci.yml --branch main --limit 5
+gh run list --workflow promote-production.yml --limit 5
 gh run watch                                   # or: gh run view <run id> --log --job <job id>
 curl -fsS https://54.79.77.189.nip.io/api/health/ready
+curl -fsS https://54.79.77.189.nip.io/api/meta          # environment and exact commit
 
 # Mode B, on the instance (Session Manager)
 systemctl status spendwise-deploy-gateway spendwise-deploy-gateway-no-imds --no-pager
@@ -864,17 +905,19 @@ aws cloudtrail lookup-events --max-results 5 \
 
 ### Redeploying and rolling back
 
-- **Redeploy the same commit:** re-run the failed deploy job in GitHub (Re-run failed jobs). It
-  deploys only if that commit is still the head of `main`.
-- **Roll back:** revert the bad commit on `main` (`git revert`, pull request, merge). CI tests the
-  revert and the deploy job ships it, like any other change.
+- **Redeploy the same commit:** re-run the failed jobs of the promotion run in GitHub (Re-run
+  failed jobs). It deploys only if that commit is still the head of `main`.
+- **Roll back:** revert the bad commit on `main` (`git revert`, pull request, merge), then
+  promote the revert once development runs it.
 - **Emergency rollback without CI:** open a Session Manager shell and, as an administrator, run
-  `sudo flock -n /run/spendwise-deploy.lock spendwise-deploy <older sha>` (the lock keeps it from
-  overlapping an automatic deploy). The gateway can't do this, because its wrapper deploys only
-  the head of `main`. In Mode A you can also send the deploy document for that SHA with your own
-  credentials. The next push to `main` deploys `main` again, so follow it with a revert.
-- **Pause automatic deploys:** `gh variable delete AWS_DEPLOY_MODE` (both jobs are then skipped).
-  Set it again to resume.
+  `sudo flock -n /run/spendwise-deploy.lock env APP_VERSION=<older sha> spendwise-deploy <older sha>`.
+  The lock keeps it from overlapping a promotion. The gateway can't do this, because its
+  wrapper deploys only the head of `main`. The next promotion deploys `main` again, so follow it
+  with a revert. A change that added a migration can't be rolled back this way: the older code
+  doesn't know the newer database revision. See
+  [Rollback](../../docs/environments.md#rollback).
+- **Pause promotions:** `gh variable delete AWS_DEPLOY_MODE` (the workflow then refuses to run).
+  Set it to `oidc-gateway` again to resume.
 
 ## Tearing down
 
@@ -897,8 +940,8 @@ aws ec2 delete-volume --volume-id vol-…        # deletes the database permanen
 Run the `describe-volumes` command after a failed first create too: each attempt leaves a
 volume. Delete the deploy key parameter and the budget stack when you no longer need them.
 
-**Continuous deployment.** Delete the GitHub variables **before** the stack, so pushes to `main`
-skip the deploy instead of failing against a gateway, or a role, that no longer exists:
+**Deploys.** Delete the GitHub variables **before** the stack, so the promotion workflow refuses
+at once instead of failing against a gateway, or a role, that no longer exists:
 
 ```bash
 for v in AWS_DEPLOY_MODE PRODUCTION_URL AWS_DEPLOY_ROLE_ARN AWS_INSTANCE_ID AWS_DEPLOY_DOCUMENT AWS_REGION; do
@@ -924,7 +967,8 @@ Nothing here needs AWS credentials:
 uvx cfn-lint deploy/aws/spendwise-stack.yaml deploy/aws/budget.yaml
 # Free-tier and security guardrails, the deploy gateway and its host files, and the workflow
 cd backend && uv run pytest tests/unit/test_aws_templates.py tests/unit/test_deploy_gateway.py \
-  tests/unit/test_aws_gateway_host.py tests/unit/test_ci_workflow.py && cd ..
+  tests/unit/test_aws_gateway_host.py tests/unit/test_ci_workflow.py \
+  tests/unit/test_promote_workflow.py tests/unit/test_render_blueprint.py && cd ..
 # Workflow syntax and its shell scripts (actionlint includes shellcheck)
 docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:latest
 # The gateway's shell scripts
@@ -952,11 +996,15 @@ The tests (part of the normal backend suite and CI) check, among other things:
   document and this instance, no administrator or wildcard permissions, and the outputs;
 - that Compose publishes only Caddy, and that Caddy reaches the gateway only for `POST /_deploy`,
   through the read-only socket mount;
+- that the instance is `APP_ENV=production`, that the deployed SHA reaches the app container as
+  `APP_VERSION` (`docker compose config` of the instance's files), and that production and
+  development never share a database;
 - Mode B's gateway, with locally generated RSA keys and a fake issuer (never GitHub's):
   - a valid token is accepted; wrong key, unknown `kid`, bad signature, `alg: none`, HMAC and
     other algorithms, wrong issuer or audience, expired, not yet valid or implausible `iat`, and
-    every wrong claim (subject, repository, IDs, branch, tag, pull request, self-hosted runner,
-    workflow, SHA, run) are refused;
+    every wrong claim (subject, repository, IDs, branch, tag, pull request, push, CI's old
+    `ci.yml` push token, other events, self-hosted runner, workflow, SHA, run) are refused, and a
+    manual run of the promotion workflow on `main` is accepted;
   - key rotation and refresh limits, and failing closed when discovery or keys are unusable;
   - each `jti` works once, also for simultaneous requests and after a restart;
   - one deploy at a time; the wrapper's results, time limit, bounded and redacted output, and
@@ -964,14 +1012,22 @@ The tests (part of the normal backend suite and CI) check, among other things:
   - the HTTP side: `POST /_deploy` only, the size limit, the socket's permissions;
 - the gateway's host files:
   - the wrapper accepts only one 40-character lowercase SHA, takes the lock, deploys only the
-    head of `main`, and resets the umask;
+    head of `main`, passes that SHA as `APP_VERSION`, and resets the umask;
   - the sudo rule allows only the wrapper, with a SHA;
   - the installer's isolation checks run before the gateway starts;
   - packages are hash-pinned, and the units run unprivileged behind the metadata block;
-- the workflow:
+- the workflows (their shell steps run against stand-ins for `gh`, `curl` and `git`):
   - every job is GitHub-hosted, and no self-hosted runner remains;
-  - deploys only on a push to `main` after "All checks passed", never for pull requests;
-  - the gateway job gets only `id-token: write`, requests its own token with the gateway's
+  - CI only tests: no job has `id-token`, calls `/_deploy` or uses production settings, for
+    pushes and pull requests alike;
+  - promotion is `workflow_dispatch` only, on `main` only, for `github.sha`, with no inputs, one
+    at a time and never cancelled;
+  - it requires the commit's successful CI push run and "All checks passed", and fails for a
+    missing, running, failed, other-commit, pull-request or fork run;
+  - it waits for development to report the commit (bounded), and requires environment
+    `development`, health and readiness;
+  - only its deploy job gets `id-token: write`; it requests its own token with the gateway's
     audience, masks it and never puts it on a command line;
-  - the exact commit SHA and run, and no AWS keys, tokens or secrets;
-  - bounded polling and the health checks.
+  - any gateway answer but `success` fails it; polling is bounded;
+  - production must then be healthy, ready, `production`, on the promoted SHA, and serve `/`;
+  - no AWS keys, tokens, secrets or third-party actions.

@@ -44,6 +44,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/meta": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Meta
+         * @description Which environment this is and which commit it runs; public, like the health checks.
+         *
+         *     The promotion workflow waits for development to report a commit before deploying it to
+         *     production, then checks production reports it. Nothing else is exposed: no hostnames,
+         *     database details, infrastructure IDs or secrets.
+         */
+        get: operations["meta"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/signup": {
         parameters: {
             query?: never;
@@ -345,6 +369,20 @@ export interface components {
              */
             password: string;
         };
+        /** MetaResponse */
+        MetaResponse: {
+            /**
+             * Environment
+             * @description APP_ENV of this deployment.
+             * @enum {string}
+             */
+            environment: "local" | "test" | "development" | "production";
+            /**
+             * Version
+             * @description The exact Git commit this deployment runs (40 lowercase hex characters), or null if the deployment did not supply one.
+             */
+            version: string | null;
+        };
         /** MonthlyTrend */
         MonthlyTrend: {
             /** Months */
@@ -585,6 +623,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    meta: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetaResponse"];
                 };
             };
         };

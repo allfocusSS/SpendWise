@@ -81,6 +81,9 @@ def test_wrapper_locks_checks_the_head_of_main_then_runs_spendwise_deploy() -> N
     assert re.findall(r"^exec [^9].*$", text, re.M) == [
         'exec timeout --kill-after=60 3000 /usr/local/bin/spendwise-deploy "$sha"'
     ]
+    # Its version for the app is that same validated SHA, set right before the deploy.
+    assert re.findall(r"^export APP_VERSION=.*$", text, re.M) == ['export APP_VERSION="$sha"']
+    assert text.index('export APP_VERSION="$sha"') > text.index('if [ "$head" != "$sha" ]; then')
     assert "eval" not in text
     assert "umask 022" in text  # sudo keeps the gateway's umask otherwise
     assert "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin" in text
@@ -95,7 +98,7 @@ def wrapper_copy(tmp_path: Path) -> tuple[Path, Path]:
     deploy = tmp_path / "spendwise-deploy"
     deploy.write_text(
         f'#!/bin/bash\necho "Deploying $1 (${{1:0:7}})"\numask > {tmp_path}/umask\n'
-        f'echo "$@" > {tmp_path}/args\n'
+        f'echo "$@" > {tmp_path}/args\necho "${{APP_VERSION-unset}}" > {tmp_path}/app_version\n'
     )
     for path in (bin_dir / "git", deploy):
         path.chmod(0o755)
@@ -129,6 +132,19 @@ def test_wrapper_deploys_the_head_of_main_with_a_normal_umask(wrapper_copy, tmp_
     assert result.stdout.startswith(f"Deploying {SHA} ")
     assert (tmp_path / "args").read_text() == SHA + "\n"
     assert (tmp_path / "umask").read_text().strip() == "0022"
+    # The app container gets the same SHA as its version (compose.yaml: APP_VERSION).
+    assert (tmp_path / "app_version").read_text() == SHA + "\n"
+
+
+@needs_util_linux
+def test_wrapper_version_is_the_deployed_sha_whatever_the_caller_set(
+    wrapper_copy, tmp_path
+) -> None:
+    copy, _ = wrapper_copy
+    (tmp_path / "head").write_text(SHA)
+    result = run(copy, SHA, env={"APP_VERSION": "1" * 40})
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "app_version").read_text() == SHA + "\n"
 
 
 @needs_util_linux

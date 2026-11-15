@@ -10,8 +10,9 @@ Actions OIDC token (``Authorization: Bearer``) and the JSON body
 
 1. verifies the token's RS256 signature with GitHub's published keys (OpenID discovery, then
    ``jwks_uri``), and its expiry, not-before, issued-at, issuer and audience;
-2. requires the exact claims of a push to main of this repository, by the ci.yml workflow, on a
-   GitHub-hosted runner, for the commit, run and attempt named in the body;
+2. requires the exact claims of a manual run (workflow_dispatch) on main of this repository's
+   promotion workflow (promote-production.yml), on a GitHub-hosted runner, for the commit, run
+   and attempt named in the body. Pushes, and so CI (ci.yml), can no longer deploy;
 3. accepts each token once (its ``jti`` is recorded in SQLite);
 4. starts ``sudo -n /usr/local/sbin/spendwise-deploy-sha <sha>`` in the background, at most one
    deploy at a time, and answers ``202 running``. Later requests from the same run, each with a
@@ -56,6 +57,9 @@ GITHUB_ISSUER = "https://token.actions.githubusercontent.com"
 # Never "none", never a symmetric (HS*) algorithm.
 ALGORITHMS = ("RS256",)
 DEPLOY_PATH = "/_deploy"
+# The only event that may deploy: someone started the promotion workflow by hand (Actions, Run
+# workflow). Not configurable, so the settings file can't widen it to pushes or pull requests.
+EVENT_NAME = "workflow_dispatch"
 # The one privileged operation: root-owned, allowed by one sudo rule, for one SHA argument.
 DEPLOY_COMMAND = ("/usr/bin/sudo", "-n", "/usr/local/sbin/spendwise-deploy-sha")
 # The wrapper stops spendwise-deploy after 50 minutes; this is only a backstop.
@@ -110,7 +114,7 @@ class Settings:
     repository_id: str
     owner_id: str
     ref: str  # refs/heads/main
-    workflow: str  # .github/workflows/ci.yml
+    workflow: str  # .github/workflows/promote-production.yml
     socket_path: Path
     state_dir: Path
     health_url: str
@@ -355,7 +359,7 @@ class TokenVerifier:
             "repository_owner_id": s.owner_id,
             "ref": s.ref,
             "ref_type": "branch",
-            "event_name": "push",
+            "event_name": EVENT_NAME,
             "runner_environment": "github-hosted",
             "workflow_ref": s.workflow_ref,
             "sha": request.sha,
@@ -853,6 +857,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         count = keys.refresh()
         print(f"subject       {settings.subject}")
         print(f"workflow_ref  {settings.workflow_ref}")
+        print(f"event_name    {EVENT_NAME}")
         print(f"audience      {settings.audience}")
         print(f"signing keys  {count} from {settings.issuer}")
         return 0

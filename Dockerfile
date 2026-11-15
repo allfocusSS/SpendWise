@@ -8,8 +8,9 @@
 #   docker run --rm -p 127.0.0.1:8000:8000 \
 #     -e DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/spendwise spendwise
 #
-# The session cookie is Secure for every HTTPS request and in production; for plain HTTP on
-# localhost add -e SESSION_COOKIE_SECURE=false. Deploying: see README, "Deploy to Railway".
+# The session cookie is Secure for every HTTPS request and in development and production; for
+# plain HTTP on localhost add -e APP_ENV=local or -e SESSION_COOKIE_SECURE=false. Deploying: see
+# README, "Deploy to Railway".
 
 # ---- 1. Frontend build (Node) ----
 FROM node:24-slim AS frontend
@@ -36,9 +37,12 @@ FROM python:3.13-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" \
-    ENVIRONMENT=production \
+    APP_ENV=production \
     FRONTEND_DIST=/app/frontend_dist
-# DATABASE_URL has no default: ENVIRONMENT=production refuses to start without a PostgreSQL URL.
+# APP_ENV defaults to the strictest setting; every deployment sets its own anyway (development on
+# Render, production on AWS, local for the local Compose stack). DATABASE_URL has no default: a
+# deployed environment (development or production) refuses to start without a PostgreSQL URL.
+# APP_VERSION (the commit, for GET /api/meta) is a run-time setting, never baked into the image.
 
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin spendwise
 WORKDIR /app

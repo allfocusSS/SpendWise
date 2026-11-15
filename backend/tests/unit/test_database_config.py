@@ -1,4 +1,4 @@
-"""DATABASE_URL handling: SQLite locally, PostgreSQL (psycopg 3) in production."""
+"""DATABASE_URL handling: SQLite locally, PostgreSQL (psycopg 3) when deployed."""
 
 import pytest
 from pydantic import ValidationError
@@ -13,7 +13,7 @@ PG_URL = f"postgresql+psycopg://spendwise:{PASSWORD}@db.example:5432/spendwise"
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ignore the developer's shell environment and .env file."""
-    for var in ("ENVIRONMENT", "DATABASE_URL"):
+    for var in ("APP_ENV", "ENVIRONMENT", "DATABASE_URL"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -46,14 +46,16 @@ def test_plain_postgresql_urls_use_psycopg_3(given: str, expected: str) -> None:
     assert settings(database_url=given).database_url == expected
 
 
+@pytest.mark.parametrize("app_env", ["development", "production"])
 @pytest.mark.parametrize("url", ["sqlite:///./spendwise.db", "sqlite:////app/data/x.db"])
-def test_production_refuses_sqlite(url: str) -> None:
-    with pytest.raises(ValidationError, match="requires a PostgreSQL DATABASE_URL"):
-        settings(environment="production", database_url=url)
+def test_deployed_environments_refuse_sqlite(app_env: str, url: str) -> None:
+    with pytest.raises(ValidationError, match=f"APP_ENV={app_env} requires a PostgreSQL"):
+        settings(app_env=app_env, database_url=url)
 
 
-def test_production_accepts_postgresql() -> None:
-    config = settings(environment="production", database_url="postgres://u:p@h/d")
+@pytest.mark.parametrize("app_env", ["development", "production"])
+def test_deployed_environments_accept_postgresql(app_env: str) -> None:
+    config = settings(app_env=app_env, database_url="postgres://u:p@h/d")
     assert config.database_url == "postgresql+psycopg://u:p@h/d"
 
 
@@ -65,8 +67,8 @@ def test_password_is_not_in_repr() -> None:
 @pytest.mark.parametrize(
     "values",
     [
-        {"environment": "production", "database_url": f"sqlite:///{PASSWORD}.db"},
-        {"environment": "staging", "database_url": PG_URL},
+        {"app_env": "production", "database_url": f"sqlite:///{PASSWORD}.db"},
+        {"app_env": "staging", "database_url": PG_URL},
         {"ai_provider": "openai", "database_url": PG_URL},
     ],
 )

@@ -5,10 +5,11 @@
 #   sudo -n /usr/local/sbin/spendwise-deploy-sha <40-character lowercase commit SHA>
 #
 # It deploys that commit with spendwise-deploy, only if it is the current head of main, one
-# deploy at a time on this host, and for at most 50 minutes. A manual deploy can use it too, to
-# take the same lock. Exit codes the gateway reports:
+# deploy at a time on this host, and for at most 50 minutes, and the app reports that commit as
+# its version (GET /api/meta). A manual deploy can use it too, to take the same lock. Exit codes
+# the gateway reports:
 #   64  the argument is not one 40-character lowercase SHA
-#   65  it is not the head of main (a newer commit deploys instead)
+#   65  it is not the head of main (nothing is deployed; promote the new head instead)
 #   75  another deploy is running
 #   124 spendwise-deploy ran out of time (137 if it had to be killed)
 #   any other non-zero code is spendwise-deploy's own failure.
@@ -44,4 +45,7 @@ if [ "$head" != "$sha" ]; then
   exit 65
 fi
 
+# The exact commit being deployed becomes the app's version: spendwise-deploy runs docker
+# compose, and compose.yaml passes APP_VERSION into the app container.
+export APP_VERSION="$sha"
 exec timeout --kill-after=60 3000 /usr/local/bin/spendwise-deploy "$sha"

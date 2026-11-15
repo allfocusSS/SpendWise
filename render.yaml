@@ -1,10 +1,18 @@
-# Render Blueprint for SpendWise (README, "Deploy to Render").
+# Render Blueprint for SpendWise: the DEVELOPMENT environment (docs/environments.md).
 #
-# Render does not run Docker Compose. This Blueprint describes the same production shape with
+#   development  Render, https://spendwise-amyx.onrender.com, its own Render PostgreSQL database;
+#                deploys every commit on main automatically once CI has passed.
+#   production   AWS (deploy/aws/), its own PostgreSQL on the instance; changes only through the
+#                manual "Promote Development to Production" workflow, never from this file.
+#
+# Render does not run Docker Compose. This Blueprint describes the same application shape with
 # Render's own resources: one Docker web service built from the existing root Dockerfile (React
 # build + FastAPI) and one managed Render PostgreSQL database. compose.yaml and
 # compose.override.yaml stay the definition for local use and for the integration and
 # end-to-end tests.
+#
+# The names "spendwise" and "spendwise-db" must not change: Render matches a Blueprint's
+# resources by name, so a new name would create a new service (another URL) or database.
 #
 # Free plans only: no paid instance types, disks, extra instances, autoscaling or backups.
 # Free limits (README): the web service sleeps after 15 minutes without traffic, and the free
@@ -23,19 +31,25 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     branch: main
-    # Deploy each new commit on main once its GitHub checks (the CI workflow) have passed.
+    # Deploy each new commit on main once its GitHub checks (the CI workflow) have passed. The
+    # promotion workflow then waits for this service to report that commit (GET /api/meta).
     autoDeployTrigger: checksPass
     # 200 only when the database answers; Render routes traffic to a new deploy once it passes.
     healthCheckPath: /api/health/ready
     envVars:
-      - key: ENVIRONMENT
-        value: production
+      # GET /api/meta reports it; the promotion workflow refuses a development that says
+      # otherwise. The version needs no setting: Render provides RENDER_GIT_COMMIT, the commit of
+      # each deploy. (Render keeps the old ENVIRONMENT=production variable of this service after
+      # it left this file; the app no longer reads it.)
+      - key: APP_ENV
+        value: development
       - key: AI_PROVIDER
         value: fake
       - key: SESSION_TTL_DAYS
         value: "14"
       # The database's internal connection string (postgresql://USER:PASSWORD@HOST/DB); the
-      # app selects the psycopg driver itself.
+      # app selects the psycopg driver itself. Development's own database: production's is on
+      # the AWS instance, and neither ever uses the other's (no data is copied either way).
       - key: DATABASE_URL
         fromDatabase:
           name: spendwise-db
@@ -45,7 +59,7 @@ services:
       - key: DB_WAIT_TIMEOUT
         value: "300"
       # PORT is not set here: Render provides it (10000 by default) and the app listens on it.
-      # SESSION_COOKIE_SECURE is not set: production cookies are Secure, and every request that
+      # SESSION_COOKIE_SECURE is not set: development cookies are Secure, and every request that
       # reached Render over HTTPS gets a Secure cookie.
 
 databases:

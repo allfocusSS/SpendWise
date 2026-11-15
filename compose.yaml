@@ -49,7 +49,12 @@ services:
         condition: service_healthy
         restart: true
     environment:
-      ENVIRONMENT: production
+      # Fixed here, like the database URL, so a .env file meant for running the backend from
+      # source cannot change it. compose.override.yaml makes the local stack "local".
+      APP_ENV: production
+      # The exact commit being deployed, reported by GET /api/meta. On AWS the deploy wrapper sets
+      # it (deploy/aws/gateway/spendwise-deploy-sha); unset, the app reports no version.
+      APP_VERSION: ${APP_VERSION:-}
       # "db" is the database's hostname on the Compose network. Platforms with other private
       # hostnames set DATABASE_URL themselves (README, "Deploy to Railway").
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-spendwise}:${POSTGRES_PASSWORD:-}@db:5432/${POSTGRES_DB:-spendwise}

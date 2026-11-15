@@ -39,7 +39,10 @@ ISSUER = "https://issuer.test"
 AUDIENCE = "spendwise-deploy"
 REPOSITORY = "allfocusSS/SpendWise"
 SUBJECT = "repo:allfocusSS@189591398/SpendWise@1441102769:ref:refs/heads/main"
-WORKFLOW_REF = "allfocusSS/SpendWise/.github/workflows/ci.yml@refs/heads/main"
+# Production deploys come only from the manual promotion workflow (docs/environments.md).
+WORKFLOW_REF = "allfocusSS/SpendWise/.github/workflows/promote-production.yml@refs/heads/main"
+# What CI's deploy job used to send before promotion became manual: refused now.
+CI_WORKFLOW_REF = "allfocusSS/SpendWise/.github/workflows/ci.yml@refs/heads/main"
 SHA = "835f9e36979e446878df74d9c9340bbd3ad46922"
 OTHER_SHA = "1a87352a1a87352a1a87352a1a87352a1a87352a"
 
@@ -101,7 +104,7 @@ def settings(tmp_path) -> "gw.Settings":
         repository_id="1441102769",
         owner_id="189591398",
         ref="refs/heads/main",
-        workflow=".github/workflows/ci.yml",
+        workflow=".github/workflows/promote-production.yml",
         socket_path=tmp_path / "gateway.sock",
         state_dir=tmp_path,
         health_url="https://example.test/api/health/ready",
@@ -140,7 +143,7 @@ def claims(**overrides) -> dict:
         "repository_owner_id": "189591398",
         "ref": "refs/heads/main",
         "ref_type": "branch",
-        "event_name": "push",
+        "event_name": "workflow_dispatch",
         "runner_environment": "github-hosted",
         "workflow_ref": WORKFLOW_REF,
         "sha": SHA,
@@ -316,16 +319,40 @@ def test_small_clock_skew_is_tolerated(verifier) -> None:
         pytest.param({"ref": "refs/pull/42/merge"}, id="pull-request-ref"),
         pytest.param({"event_name": "pull_request"}, id="pull-request"),
         pytest.param({"event_name": "pull_request_target"}, id="pull-request-target"),
-        pytest.param({"event_name": "workflow_dispatch"}, id="workflow-dispatch"),
+        pytest.param({"event_name": "push"}, id="push"),
+        pytest.param({"event_name": "schedule"}, id="schedule"),
+        pytest.param({"event_name": "workflow_run"}, id="workflow-run"),
+        pytest.param({"event_name": "repository_dispatch"}, id="repository-dispatch"),
+        pytest.param({"event_name": "merge_group"}, id="merge-group"),
+        pytest.param({"event_name": "Workflow_Dispatch"}, id="event-case"),
+        pytest.param({"event_name": None}, id="no-event"),
         pytest.param({"runner_environment": "self-hosted"}, id="self-hosted-runner"),
         pytest.param({"runner_environment": None}, id="no-runner-environment"),
         pytest.param(
             {"workflow_ref": "allfocusSS/SpendWise/.github/workflows/evil.yml@refs/heads/main"},
             id="other-workflow",
         ),
+        pytest.param({"workflow_ref": CI_WORKFLOW_REF}, id="ci-workflow"),
         pytest.param(
-            {"workflow_ref": "allfocusSS/SpendWise/.github/workflows/ci.yml@refs/pull/42/merge"},
+            {
+                "workflow_ref": "allfocusSS/SpendWise/.github/workflows/"
+                "promote-production.yml@refs/pull/42/merge"
+            },
             id="workflow-from-a-pull-request",
+        ),
+        pytest.param(
+            {
+                "workflow_ref": "allfocusSS/SpendWise/.github/workflows/"
+                "promote-production.yml@refs/heads/feature"
+            },
+            id="workflow-from-another-branch",
+        ),
+        pytest.param(
+            {
+                "workflow_ref": "someone/SpendWise/.github/workflows/"
+                "promote-production.yml@refs/heads/main"
+            },
+            id="workflow-of-another-repository",
         ),
         pytest.param({"workflow_ref": None}, id="no-workflow-ref"),
         pytest.param({"sha": OTHER_SHA}, id="sha-does-not-match-the-body"),
@@ -335,6 +362,82 @@ def test_small_clock_skew_is_tolerated(verifier) -> None:
 )
 def test_every_github_claim_must_match(verifier, overrides) -> None:
     assert rejected(verifier, sign(claims(**overrides)))
+
+
+def test_the_old_ci_push_token_can_no_longer_deploy(verifier) -> None:
+    # Exactly what ci.yml's deploy job sent for a push to main before promotion became manual.
+    assert rejected(verifier, sign(claims(event_name="push", workflow_ref=CI_WORKFLOW_REF)))
+
+
+def test_a_manual_run_of_the_promotion_workflow_on_main_is_accepted(verifier) -> None:
+    payload = claims(event_name="workflow_dispatch", workflow_ref=WORKFLOW_REF)
+    assert verifier.verify(sign(payload), REQUEST)["workflow_ref"] == WORKFLOW_REF
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # A manual run of the promotion workflow on another branch: GitHub changes the ref, the
+        # subject and the workflow ref together.
+        pytest.param(
+            {
+                "ref": "refs/heads/feature",
+                "sub": "repo:allfocusSS@189591398/SpendWise@1441102769:ref:refs/heads/feature",
+                "workflow_ref": "allfocusSS/SpendWise/.github/workflows/"
+                "promote-production.yml@refs/heads/feature",
+            },
+            id="promotion-from-another-branch",
+        ),
+        # A pull request that adds a workflow_dispatch to ci.yml or edits the promotion workflow.
+        pytest.param(
+            {
+                "event_name": "pull_request",
+                "ref": "refs/pull/42/merge",
+                "sub": "repo:allfocusSS@189591398/SpendWise@1441102769:pull_request",
+                "workflow_ref": "allfocusSS/SpendWise/.github/workflows/"
+                "promote-production.yml@refs/pull/42/merge",
+            },
+            id="pull-request",
+        ),
+        # A pushed tag, in the promotion workflow.
+        pytest.param(
+            {
+                "event_name": "push",
+                "ref": "refs/tags/v1.0.0",
+                "ref_type": "tag",
+                "sub": "repo:allfocusSS@189591398/SpendWise@1441102769:ref:refs/tags/v1.0.0",
+                "workflow_ref": "allfocusSS/SpendWise/.github/workflows/"
+                "promote-production.yml@refs/tags/v1.0.0",
+            },
+            id="tag",
+        ),
+        # The promotion workflow, run by hand from a fork (another repository and ID).
+        pytest.param(
+            {
+                "repository": "someone/SpendWise",
+                "repository_id": "555",
+                "repository_owner_id": "444",
+                "sub": "repo:someone@444/SpendWise@555:ref:refs/heads/main",
+                "workflow_ref": "someone/SpendWise/.github/workflows/"
+                "promote-production.yml@refs/heads/main",
+            },
+            id="fork",
+        ),
+        # A job that uses a GitHub environment gets another subject.
+        pytest.param(
+            {"sub": "repo:allfocusSS@189591398/SpendWise@1441102769:environment:production"},
+            id="github-environment",
+        ),
+    ],
+)
+def test_realistic_tokens_from_anywhere_else_are_rejected(verifier, overrides) -> None:
+    assert rejected(verifier, sign(claims(**overrides)))
+
+
+def test_a_token_for_another_commit_than_the_request_is_rejected(verifier) -> None:
+    # The promotion of OTHER_SHA can't be used to deploy SHA, nor the other way round.
+    assert rejected(verifier, sign(claims(sha=OTHER_SHA)), REQUEST)
+    assert rejected(verifier, sign(claims()), gw.DeployRequest(OTHER_SHA, "123456789", "1"))
 
 
 def test_repository_name_alone_is_not_enough(verifier) -> None:
@@ -775,6 +878,12 @@ def test_failed_deploys_are_reported(gateway, fake_deployer, result) -> None:
     assert (code, answer["status"], answer["exit_code"]) == (200, *result)
 
 
+def test_the_old_ci_push_token_is_refused_without_deploying(gateway, fake_deployer) -> None:
+    token = sign(claims(event_name="push", workflow_ref=CI_WORKFLOW_REF))
+    assert post(gateway, token) == (401, {"status": "unauthorized"})
+    assert fake_deployer.runs == []
+
+
 def test_a_replayed_token_is_refused(gateway, fake_deployer) -> None:
     token = sign(claims())
     assert post(gateway, token)[0] == 202
@@ -851,7 +960,7 @@ def test_unavailable_keys_are_a_503_not_an_acceptance(gateway, issuer, fake_depl
 
 def test_tokens_are_never_logged(gateway, caplog) -> None:
     caplog.set_level(logging.DEBUG)
-    good, bad = sign(claims()), sign(claims(event_name="pull_request"))
+    good, bad = sign(claims()), sign(claims(event_name="push"))
     post(gateway, good)
     finish(gateway)
     post(gateway, good)  # replay
@@ -1035,6 +1144,22 @@ def test_the_installed_settings_trust_exactly_this_repository() -> None:
 def test_the_issuer_cannot_be_configured() -> None:
     s = gw.Settings.from_env(installed_env() | {"DEPLOY_GATEWAY_ISSUER": "https://evil.test"})
     assert s.issuer == gw.GITHUB_ISSUER
+
+
+def test_the_event_is_fixed_to_a_manual_run(settings, keys) -> None:
+    assert gw.EVENT_NAME == "workflow_dispatch"
+    # No setting widens it: an extra variable in the settings file changes nothing.
+    s = gw.Settings.from_env(installed_env() | {"DEPLOY_GATEWAY_EVENT_NAME": "push"})
+    assert not hasattr(s, "event_name")
+    verifier = gw.TokenVerifier(settings, keys)
+    assert rejected(verifier, sign(claims(event_name="push")))
+
+
+def test_the_installed_settings_trust_only_the_promotion_workflow() -> None:
+    env = installed_env()
+    assert env["DEPLOY_GATEWAY_WORKFLOW"] == ".github/workflows/promote-production.yml"
+    assert (ROOT / env["DEPLOY_GATEWAY_WORKFLOW"]).is_file()
+    assert "ci.yml" not in env["DEPLOY_GATEWAY_WORKFLOW"]
 
 
 @pytest.mark.parametrize(

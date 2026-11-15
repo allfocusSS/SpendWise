@@ -64,11 +64,12 @@ def test_session_tokens_are_random_and_stored_only_as_sha256() -> None:
     assert token not in stored
 
 
-PRODUCTION = {"environment": "production", "database_url": "postgresql://u:p@h/d"}
+PRODUCTION = {"app_env": "production", "database_url": "postgresql://u:p@h/d"}
+DEVELOPMENT = {"app_env": "development", "database_url": "postgresql://u:p@h/d"}
 
 
 def settings(monkeypatch, **values) -> Settings:
-    for var in ("ENVIRONMENT", "DATABASE_URL", "SESSION_COOKIE_SECURE"):
+    for var in ("APP_ENV", "ENVIRONMENT", "DATABASE_URL", "SESSION_COOKIE_SECURE"):
         monkeypatch.delenv(var, raising=False)
     return Settings(_env_file=None, **values)
 
@@ -77,11 +78,13 @@ def settings(monkeypatch, **values) -> Settings:
     ("values", "secure"),
     [
         ({}, False),
-        ({"environment": "local"}, False),
+        ({"app_env": "local"}, False),
+        ({"app_env": "test"}, False),
         (PRODUCTION, True),
+        (DEVELOPMENT, True),
         ({**PRODUCTION, "session_cookie_secure": "false"}, False),  # production on http://localhost
-        ({"environment": "local", "session_cookie_secure": "true"}, True),
-        ({"environment": "local", "session_cookie_secure": ""}, False),
+        ({"app_env": "local", "session_cookie_secure": "true"}, True),
+        ({"app_env": "local", "session_cookie_secure": ""}, False),
     ],
 )
 def test_plain_http_cookie_follows_the_environment(monkeypatch, values: dict, secure: bool) -> None:
@@ -92,7 +95,7 @@ def test_plain_http_cookie_follows_the_environment(monkeypatch, values: dict, se
     "values",
     [
         {},
-        {"environment": "local", "session_cookie_secure": "false"},
+        {"app_env": "local", "session_cookie_secure": "false"},
         {**PRODUCTION, "session_cookie_secure": "false"},  # e.g. a local setting copied to a host
         PRODUCTION,
     ],
