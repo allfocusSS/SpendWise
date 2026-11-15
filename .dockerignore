@@ -27,6 +27,7 @@
 **/htmlcov
 backend/tests
 backend/integration
+backend/observability_smoke
 
 # Node / frontend (the image builds its own node_modules and dist)
 **/node_modules

@@ -806,6 +806,20 @@ also fails if the page throws an uncaught error or the server answers 5xx.
 **In CI** this runs as the "End-to-end" job; see [Continuous integration](#continuous-integration).
 `CI=true` turns on one retry, two workers and fails on a stray `test.only`.
 
+## Observability (OpenTelemetry)
+
+The API can send traces, metrics and logs over OTLP/HTTP to an OpenTelemetry Collector. It's off
+by default, and not yet enabled in development or production. To try it locally:
+
+```bash
+docker compose -f compose.yaml -f compose.override.yaml -f compose.observability.yaml up -d --build
+docker compose -f compose.yaml -f compose.override.yaml -f compose.observability.yaml logs -f otel-collector
+make observability     # automated: traces, metrics and logs must all reach the Collector
+```
+
+[docs/observability.md](docs/observability.md) covers the architecture, settings, sampling,
+data policy, failure behaviour and the coming Grafana step.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs the complete suite on every pull request to `main`, on every
@@ -821,9 +835,10 @@ only through `.github/workflows/promote-production.yml`, run by hand
 | Frontend | oxlint, generated API types match `openapi.json`, typecheck (app and e2e tests), Vitest, production build | `cd frontend && npm ci && npm run lint && npm run generate:api && git diff --exit-code src/api/schema.d.ts && npm run typecheck && npm test && npm run build` |
 | Integration | builds the image and runs the real Compose stack (PostgreSQL), then the integration suite | `make integration` |
 | End-to-end | builds the image and runs the real Compose stack, then Playwright (Chromium, desktop and phone) | `make e2e` |
+| Observability (OpenTelemetry) | builds the image and runs the Compose stack with an OpenTelemetry Collector; real traffic must produce spans, metric data points and log records at the Collector, with the right resource, trace context in the logs and nothing sensitive in any of them | `make observability` |
 | All checks passed | succeeds only if every job above succeeded | |
 
-The five test jobs run in parallel; a full run takes roughly as long as the slowest job,
+The six test jobs run in parallel; a full run takes roughly as long as the slowest job,
 End-to-end, which builds the image and installs Chromium before the tests. Use "All checks
 passed" as the single required status check in branch protection.
 
@@ -873,4 +888,7 @@ make integration
 
 # Browser end-to-end tests against the real Docker Compose stack (see above)
 make e2e
+
+# OpenTelemetry: traces, metrics and logs reach a Collector (see "Observability")
+make observability
 ```

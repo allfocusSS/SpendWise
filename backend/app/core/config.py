@@ -2,6 +2,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -13,6 +14,8 @@ AppEnv = Literal["local", "test", "development", "production"]
 DEPLOYED_ENVIRONMENTS = frozenset({"development", "production"})
 # A version is always a full Git commit SHA, never a branch name or an abbreviation.
 COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+# service.name of every trace, metric and log the backend sends (docs/observability.md).
+SERVICE_NAME = "spendwise-api"
 
 
 def normalize_database_url(url: str) -> str:
@@ -74,6 +77,22 @@ class Settings(BaseSettings):
     # Only the provider that sends the key may call .get_secret_value().
     anthropic_api_key: SecretStr | None = None
 
+    # OpenTelemetry: traces, metrics and logs over OTLP/HTTP (app/observability,
+    # docs/observability.md). Off unless OTEL_ENABLED=true, so nothing is ever sent anywhere by
+    # default. OTEL_SDK_DISABLED=true, OpenTelemetry's own switch, turns it off whatever
+    # OTEL_ENABLED says.
+    otel_enabled: bool = False
+    otel_sdk_disabled: bool = False
+    # Base URL of the OTLP/HTTP receiver, normally the Collector (http://otel-collector:4318); the
+    # signal paths /v1/traces, /v1/metrics and /v1/logs are added to it. Required when enabled.
+    otel_exporter_otlp_endpoint: str | None = None
+    # The only protocol the installed exporter speaks (no gRPC, no JSON).
+    otel_exporter_otlp_protocol: Literal["http/protobuf"] = "http/protobuf"
+    # Share of new traces kept, 0.0 to 1.0 (parent-based, by trace ID; metrics and logs are never
+    # sampled). Unset: 1.0 locally and in tests. Development and production must choose a value,
+    # so a deployment never keeps every trace without deciding to.
+    otel_traces_sample_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+
     @field_validator("ai_provider", mode="before")
     @classmethod
     def _normalise_ai_provider(cls, value: object) -> object:
@@ -86,6 +105,8 @@ class Settings(BaseSettings):
         "session_cookie_secure",
         "app_version",
         "render_git_commit",
+        "otel_exporter_otlp_endpoint",
+        "otel_traces_sample_ratio",
         mode="before",
     )
     @classmethod
@@ -99,6 +120,25 @@ class Settings(BaseSettings):
         if value is not None and not COMMIT_SHA.fullmatch(value):
             raise ValueError("must be a full 40-character lowercase Git commit SHA")
         return value
+
+    @field_validator("otel_exporter_otlp_endpoint")
+    @classmethod
+    def _otlp_endpoint(cls, value: str | None) -> str | None:
+        # The messages never repeat the value: a URL with credentials in it must not be echoed.
+        if value is None:
+            return None
+        try:
+            parts = urlsplit(value.strip())
+            parts.port  # noqa: B018 (raises ValueError for an invalid port)
+        except ValueError:
+            raise ValueError("must be an http:// or https:// URL") from None
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("must be an http:// or https:// URL")
+        if parts.username or parts.password:
+            raise ValueError("must not contain credentials (use OTEL_EXPORTER_OTLP_HEADERS)")
+        if parts.query or parts.fragment:
+            raise ValueError("must not have a query string or fragment")
+        return value.strip().rstrip("/")
 
     @field_validator("database_url", mode="before")
     @classmethod
@@ -128,13 +168,24 @@ class Settings(BaseSettings):
         """The exact commit this process runs: APP_VERSION, else RENDER_GIT_COMMIT, else None."""
         return self.app_version or self.render_git_commit
 
-    def resource_attributes(self) -> dict[str, str]:
-        """This deployment as OpenTelemetry resource attributes, for telemetry to come.
+    @property
+    def telemetry_enabled(self) -> bool:
+        """OTEL_ENABLED=true, and not switched off with OTEL_SDK_DISABLED=true."""
+        return self.otel_enabled and not self.otel_sdk_disabled
 
-        deployment.environment is APP_ENV and service.version the exact commit, so telemetry
+    @property
+    def traces_sample_ratio(self) -> float:
+        """OTEL_TRACES_SAMPLE_RATIO; unset (allowed only locally and in tests), every trace."""
+        return 1.0 if self.otel_traces_sample_ratio is None else self.otel_traces_sample_ratio
+
+    def resource_attributes(self) -> dict[str, str]:
+        """The OpenTelemetry resource every trace, metric and log of this process carries.
+
+        Current semantic conventions: service.name, service.version (the exact commit, left out
+        when unknown rather than guessed) and deployment.environment.name (APP_ENV), so telemetry
         from development and production never mixes. No hostnames or infrastructure IDs.
         """
-        attributes = {"service.name": "spendwise", "deployment.environment": self.app_env}
+        attributes = {"service.name": SERVICE_NAME, "deployment.environment.name": self.app_env}
         if self.version:
             attributes["service.version"] = self.version
         return attributes
@@ -146,6 +197,22 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"APP_ENV={self.app_env} requires a PostgreSQL DATABASE_URL "
                 "(postgresql+psycopg://USER:PASSWORD@HOST:5432/DBNAME)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _telemetry_is_complete(self) -> Self:
+        if not self.telemetry_enabled:
+            return self
+        if self.otel_exporter_otlp_endpoint is None:
+            raise ValueError(
+                "OTEL_ENABLED=true requires OTEL_EXPORTER_OTLP_ENDPOINT "
+                "(the Collector's OTLP/HTTP address, e.g. http://otel-collector:4318)"
+            )
+        if self.is_deployed and self.otel_traces_sample_ratio is None:
+            raise ValueError(
+                f"APP_ENV={self.app_env} with OTEL_ENABLED=true requires OTEL_TRACES_SAMPLE_RATIO "
+                "(0.0 to 1.0, the share of traces to keep)"
             )
         return self
 

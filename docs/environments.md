@@ -119,10 +119,11 @@ new instance's first boot) reports `"version": null` until the next promotion, u
 `APP_VERSION` itself (see [Rollback](#rollback)). The image never contains a version: the same
 image could run any commit's configuration, so the version is a run-time setting.
 
-The same two values are ready for telemetry: `Settings.resource_attributes()` in
-`backend/app/core/config.py` returns `service.name` (`spendwise`), `deployment.environment`
-(`APP_ENV`) and `service.version` (the SHA, when known). Nothing uses it yet; it's there for the
-observability work that follows.
+The same two values identify every trace, metric and log the API sends through OpenTelemetry:
+`Settings.resource_attributes()` in `backend/app/core/config.py` gives `service.name`
+(`spendwise-api`), `deployment.environment.name` (`APP_ENV`) and `service.version` (the SHA, when
+known). Telemetry is off in both environments for now; see
+[Observability](observability.md).
 
 ## Data isolation
 
