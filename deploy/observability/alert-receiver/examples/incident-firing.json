@@ -1,0 +1,23 @@
+{
+  "schema": "spendwise.incident.v1",
+  "status": "firing",
+  "alert": "SpendWise AI Parse Failure Rate High",
+  "kind": "condition",
+  "rule_uid": "spendwise-ai-parse-failures",
+  "fingerprint": "a7edbaa05b9b86b7",
+  "severity": "warning",
+  "category": "ai",
+  "service": "spendwise-api",
+  "team": "spendwise",
+  "environment": "local",
+  "summary": "AI parse failures above 10% in local",
+  "description": "28.81% of AI transaction parsing requests in the local environment failed over the last 5 minutes (threshold 10%). Users asking for an AI draft are likely getting errors; entering a transaction by hand still works.",
+  "runbook": "Open the SpendWise dashboard's AI transaction parsing row: provider errors point to the AI provider being unavailable, validation errors to answers that could not be used. Then the API's logs in Loki for this environment.",
+  "value": 0.288079,
+  "starts_at": "2026-11-15T16:20:30Z",
+  "ends_at": null,
+  "grafana_url": "http://127.0.0.1:3000/alerting/grafana/spendwise-ai-parse-failures/view?orgId=1",
+  "dashboard_url": "http://127.0.0.1:3000/d/spendwise-overview?from=1794756030000&orgId=1&to=1794759660030",
+  "panel_url": "http://127.0.0.1:3000/d/spendwise-overview?from=1794756030000&orgId=1&to=1794759660030&viewPanel=19",
+  "received_at": "2026-11-15T16:21:01Z"
+}

@@ -176,10 +176,12 @@ def test_the_dashboard_is_provisioned_from_git(overlay) -> None:
     folder = "/otel-lgtm/grafana/conf/provisioning/dashboards/custom"
     assert provider["options"]["path"] == folder
     assert provider["allowUiUpdates"] is False
-    assert overlay["services"]["lgtm"]["volumes"] == [
+    assert overlay["services"]["lgtm"]["volumes"][:2] == [
         "./deploy/observability/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro",
         f"./deploy/observability/grafana/dashboards:{folder}:ro",
     ]
+    # The rest is the alerting provisioning (tests/unit/test_alerting_config.py), also read-only.
+    assert all(v.endswith(":ro") for v in overlay["services"]["lgtm"]["volumes"])
     home = overlay["services"]["lgtm"]["environment"]["GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH"]
     assert home == f"{folder}/{DASHBOARD.name}"
 
@@ -198,7 +200,10 @@ def test_only_grafana_is_published_and_only_on_loopback(overlay) -> None:
     assert lgtm["security_opt"] == ["no-new-privileges:true"]
     assert lgtm["environment"]["ENABLE_OBI"] == "false"  # no eBPF: the app is instrumented
     assert lgtm["environment"]["GF_AUTH_ANONYMOUS_ORG_ROLE"] == "Viewer"
-    assert lgtm["networks"] == ["dashboard"]  # never on the database's network
+    # Never on the database's network; "alerting" reaches the alert receiver only.
+    assert lgtm["networks"] == ["dashboard", "alerting"]
+    for name, service in overlay["services"].items():
+        assert name == "lgtm" or "ports" not in service, name
 
 
 def test_the_stack_has_a_health_check_and_sends_to_lgtm(overlay) -> None:

@@ -1,0 +1,314 @@
+# SpendWise alert rules, provisioned into Grafana from Git (compose.dashboard.yaml mounts this
+# directory read-only). Each rule reuses the dashboard's real series and PromQL, with the
+# dashboard's variables replaced by a grouping on the environment: one alert per environment,
+# whose `deployment_environment_name` label comes from the metrics themselves.
+#
+# Three separate times (docs/observability.md, "Alerts"):
+#   window       the PromQL range, [5m]: how much history one evaluation looks at;
+#   interval     how often Grafana evaluates the group (10s);
+#   for          how long the condition must hold, evaluation after evaluation, before the alert
+#                fires (Pending until then). One bad evaluation never notifies anyone.
+#
+# No data (no traffic, so no ratio) counts as OK: a quiet environment is not an outage.
+# A query that fails (Prometheus down or broken) fires Grafana's DatasourceError alert with
+# this rule's labels, through the same notification policy: never silently healthy.
+#
+# Annotations are fixed text plus the environment and the measured value: no request, user or
+# exception data. Each reads right in both cases: a value (`if .Values.A`), or none because the
+# query failed (the same annotations go with the DatasourceError alert). Templates use .Labels
+# and .Values, never the dollar forms: Grafana expands dollar signs in provisioning files as
+# environment variables.
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: spendwise-api
+    folder: SpendWise
+    interval: 10s
+    rules:
+      - uid: spendwise-http-5xx-rate
+        title: SpendWise HTTP 5xx Rate High
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              datasource: {type: prometheus, uid: prometheus}
+              editorMode: code
+              instant: true
+              range: false
+              # Server errors / all requests. With traffic but no 5xx the ratio is 0 (not "no
+              # data"); with no traffic the guarded denominator leaves nothing: no data.
+              expr: >-
+                (
+                sum by (deployment_environment_name) (rate(http_server_request_duration_seconds_count{service_name="spendwise-api", http_response_status_code=~"5.."}[5m]))
+                or
+                0 * sum by (deployment_environment_name) (rate(http_server_request_duration_seconds_count{service_name="spendwise-api"}[5m]))
+                )
+                /
+                (sum by (deployment_environment_name) (rate(http_server_request_duration_seconds_count{service_name="spendwise-api"}[5m])) > 0)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              datasource: {type: __expr__, uid: __expr__}
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0.05]}
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          service: spendwise-api
+          team: spendwise
+          severity: critical
+          category: http
+        annotations:
+          # Links the alert to its dashboard panel (dashboardURL and panelURL in notifications).
+          __dashboardUid__: spendwise-overview
+          __panelId__: "3"
+          summary: >-
+            {{ if .Values.A }}HTTP 5xx rate above 5% in {{ index .Labels "deployment_environment_name" }}{{ else
+            }}HTTP 5xx rate unknown: its query failed{{ end }}
+          description: >-
+            {{ if .Values.A }}{{ humanizePercentage .Values.A.Value }} of SpendWise API
+            requests in the {{ index .Labels "deployment_environment_name" }} environment were
+            answered with a server error (5xx) over the last 5 minutes (threshold 5%). Users are
+            likely seeing failed pages or actions.{{ else }}The rule's Prometheus query failed,
+            so the 5xx rate is unknown. This says nothing about the API itself: check that
+            Prometheus is up and reachable from Grafana.{{ end }}
+          runbook: >-
+            Open the SpendWise dashboard's Service health row for this environment, then look
+            for errors in the API's logs (Loki) and for the failing requests' traces (Tempo)
+            around the time the alert started.
+
+      - uid: spendwise-http-p95-latency
+        title: SpendWise HTTP P95 Latency High
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              datasource: {type: prometheus, uid: prometheus}
+              editorMode: code
+              instant: true
+              range: false
+              # The dashboard's p95 (histogram_quantile over the buckets, by le), per environment,
+              # and only where there was traffic: no requests means no data, never NaN.
+              expr: >-
+                histogram_quantile(0.95, sum by (deployment_environment_name, le) (rate(http_server_request_duration_seconds_bucket{service_name="spendwise-api"}[5m])))
+                and on (deployment_environment_name)
+                (sum by (deployment_environment_name) (rate(http_server_request_duration_seconds_count{service_name="spendwise-api"}[5m])) > 0)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              datasource: {type: __expr__, uid: __expr__}
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [1]}
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          service: spendwise-api
+          team: spendwise
+          severity: warning
+          category: http
+        annotations:
+          # Links the alert to its dashboard panel (dashboardURL and panelURL in notifications).
+          __dashboardUid__: spendwise-overview
+          __panelId__: "4"
+          summary: >-
+            {{ if .Values.A }}HTTP p95 latency above 1 s in {{ index .Labels "deployment_environment_name" }}{{ else
+            }}HTTP p95 latency unknown: its query failed{{ end }}
+          description: >-
+            {{ if .Values.A }}The slowest 5% of SpendWise API requests in the
+            {{ index .Labels "deployment_environment_name" }} environment took
+            {{ humanizeDuration .Values.A.Value }} or more over the last 5 minutes (threshold
+            1 s). Users are likely seeing slow pages and saves.{{ else }}The rule's Prometheus
+            query failed, so the latency is unknown. This says nothing about the API itself:
+            check that Prometheus is up and reachable from Grafana.{{ end }}
+          runbook: >-
+            Open the SpendWise dashboard's Request latency panel to see whether it is still slow,
+            then the slowest traces in Tempo for this environment: which route, and where the
+            time goes.
+
+      - uid: spendwise-transaction-save-failures
+        title: SpendWise Transaction Save Failure Rate High
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              datasource: {type: prometheus, uid: prometheus}
+              editorMode: code
+              instant: true
+              range: false
+              # Saves that failed for a system reason (database, internal) / every save attempt
+              # the service handled (saved + failed for any reason). Rejected input (validation)
+              # counts as an attempt but never as a failure here: it is the user's doing.
+              expr: >-
+                sum by (deployment_environment_name) (increase(spendwise_transaction_create_error_total{service_name="spendwise-api", error_type=~"database|internal"}[5m]))
+                /
+                (
+                (
+                sum by (deployment_environment_name) (increase(spendwise_transaction_created_total{service_name="spendwise-api"}[5m]))
+                +
+                sum by (deployment_environment_name) (increase(spendwise_transaction_create_error_total{service_name="spendwise-api"}[5m]))
+                )
+                > 0
+                )
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              datasource: {type: __expr__, uid: __expr__}
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0.01]}
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          service: spendwise-api
+          team: spendwise
+          severity: critical
+          category: transaction
+        annotations:
+          # Links the alert to its dashboard panel (dashboardURL and panelURL in notifications).
+          __dashboardUid__: spendwise-overview
+          __panelId__: "13"
+          summary: >-
+            {{ if .Values.A }}Transaction saves failing for system reasons in
+            {{ index .Labels "deployment_environment_name" }}{{ else }}Transaction save failure
+            rate unknown: its query failed{{ end }}
+          description: >-
+            {{ if .Values.A }}{{ humanizePercentage .Values.A.Value }} of transaction save
+            attempts in the {{ index .Labels "deployment_environment_name" }} environment failed
+            with a database or internal error over the last 5 minutes (threshold 1%). Rejected
+            input is not counted. Users may be unable to save transactions.{{ else }}The
+            rule's Prometheus query failed, so the save failure rate is unknown. This says
+            nothing about the API itself: check that Prometheus is up and reachable from
+            Grafana.{{ end }}
+          runbook: >-
+            Open the SpendWise dashboard's Failed saves per minute panel (by error type), then
+            the API's error logs in Loki for this environment, and check the database's health.
+
+      - uid: spendwise-ai-parse-failures
+        title: SpendWise AI Parse Failure Rate High
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              datasource: {type: prometheus, uid: prometheus}
+              editorMode: code
+              instant: true
+              range: false
+              # Failed AI parses (any error type) / AI parse requests. No requests: no data.
+              expr: >-
+                sum by (deployment_environment_name) (increase(spendwise_ai_parse_error_total{service_name="spendwise-api"}[5m]))
+                /
+                (sum by (deployment_environment_name) (increase(spendwise_ai_parse_request_total{service_name="spendwise-api"}[5m])) > 0)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              datasource: {type: __expr__, uid: __expr__}
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0.1]}
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels:
+          service: spendwise-api
+          team: spendwise
+          severity: warning
+          category: ai
+        annotations:
+          # Links the alert to its dashboard panel (dashboardURL and panelURL in notifications).
+          __dashboardUid__: spendwise-overview
+          __panelId__: "19"
+          summary: >-
+            {{ if .Values.A }}AI parse failures above 10% in {{ index .Labels "deployment_environment_name" }}{{ else
+            }}AI parse failure rate unknown: its query failed{{ end }}
+          description: >-
+            {{ if .Values.A }}{{ humanizePercentage .Values.A.Value }} of AI transaction
+            parsing requests in the {{ index .Labels "deployment_environment_name" }} environment
+            failed over the last 5 minutes (threshold 10%). Users asking for an AI draft are
+            likely getting errors; entering a transaction by hand still works.{{ else }}The
+            rule's Prometheus query failed, so the AI parse failure rate is unknown. This says
+            nothing about the API itself: check that Prometheus is up and reachable from
+            Grafana.{{ end }}
+          runbook: >-
+            Open the SpendWise dashboard's AI transaction parsing row: provider errors point to
+            the AI provider being unavailable, validation errors to answers that could not be
+            used. Then the API's logs in Loki for this environment.
+
+      - uid: spendwise-sign-in-failures
+        title: SpendWise Sign-in Failures High
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              datasource: {type: prometheus, uid: prometheus}
+              editorMode: code
+              instant: true
+              range: false
+              # Refused sign-ins per minute, averaged over 5 minutes (over 100 in 5 minutes).
+              expr: >-
+                sum by (deployment_environment_name) (rate(spendwise_auth_sign_in_failure_total{service_name="spendwise-api"}[5m])) * 60
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              datasource: {type: __expr__, uid: __expr__}
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [20]}
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          service: spendwise-api
+          team: spendwise
+          severity: warning
+          category: auth
+        annotations:
+          # Links the alert to its dashboard panel (dashboardURL and panelURL in notifications).
+          __dashboardUid__: spendwise-overview
+          __panelId__: "23"
+          summary: >-
+            {{ if .Values.A }}Refused sign-ins above 20 per minute in
+            {{ index .Labels "deployment_environment_name" }}{{ else }}Refused sign-in rate
+            unknown: its query failed{{ end }}
+          description: >-
+            {{ if .Values.A }}SpendWise refused {{ printf "%.1f" .Values.A.Value }} sign-ins
+            per minute in the {{ index .Labels "deployment_environment_name" }} environment, on
+            average over the last 5 minutes (threshold 20). This can be password guessing or a
+            broken sign-in form. The count never says which accounts.{{ else }}The rule's
+            Prometheus query failed, so the refused sign-in rate is unknown. This says nothing
+            about the API itself: check that Prometheus is up and reachable from
+            Grafana.{{ end }}
+          runbook: >-
+            Open the SpendWise dashboard's Refused sign-ins panel and compare it with the request
+            rate. The API logs each refusal ("Sign-in refused") without the email, by design.

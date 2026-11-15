@@ -1,0 +1,26 @@
+# The notification policy tree (it replaces Grafana's default one). Everything goes to the
+# webhook contact point, the only one this stack has; SpendWise's alerts get their own route,
+# grouped so that each alert in each environment is one incident.
+
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: spendwise-oncall-webhook
+    group_by: [grafana_folder, alertname]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+      - receiver: spendwise-oncall-webhook
+        object_matchers:
+          - [service, "=", spendwise-api]
+        # One group per alert and environment: one notification when it fires, one when it
+        # resolves, and a reminder every 4 hours while it keeps firing. No spam from a group
+        # whose content doesn't change.
+        group_by: [alertname, deployment_environment_name]
+        # Waits this long after an alert fires, to send alerts that fire together as one.
+        group_wait: 30s
+        # The earliest a group's next notification (another alert, or resolved) goes out.
+        group_interval: 1m
+        repeat_interval: 4h

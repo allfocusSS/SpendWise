@@ -25,6 +25,7 @@ TEST_JOBS = {
     "e2e",
     "observability",
     "dashboard",
+    "alerts",
 }
 PINNED_ACTION = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
 
@@ -101,6 +102,25 @@ def test_the_dashboard_job_runs_the_dashboard_smoke_test(workflow) -> None:
     assert job["timeout-minutes"] <= 30
 
 
+def test_the_alerts_job_runs_the_alert_smoke_test(workflow) -> None:
+    job = workflow["jobs"]["alerts"]
+    assert job["name"] == "Observability Alerts"
+    name = "Alerts (builds the image, Compose stack + Grafana LGTM + alert receiver)"
+    assert step(job, name)["run"] == "make alerts"
+    makefile = (ROOT / "Makefile").read_text()
+    assert "alerts:\n\tcd backend && uv run pytest alerts_smoke $(ARGS)" in makefile
+    cleanup = step(job, "Remove the test stack and its volume")
+    assert cleanup["if"] == "always()"
+    assert cleanup["run"] == "uv run python -m integration.stack down --dashboard"
+    assert cleanup["env"]["SPENDWISE_IT_PROJECT"] == "spendwise-alerts"
+    assert step(job, "Upload Compose logs")["if"] == "failure()"
+    # Parallel with the other jobs, and the workflow's read-only token only: no OIDC token,
+    # nothing deployed.
+    assert "needs" not in job
+    assert "permissions" not in job
+    assert job["timeout-minutes"] <= 30
+
+
 def test_every_job_runs_on_a_github_hosted_runner(workflow) -> None:
     # No self-hosted runner anywhere, in particular none on the production host.
     for name, job in workflow["jobs"].items():
@@ -150,12 +170,11 @@ def test_no_static_aws_credentials_tokens_or_secrets_anywhere() -> None:
         assert forbidden not in text
 
 
-def test_the_gateway_code_is_linted_in_ci(workflow) -> None:
+def test_the_gateway_and_alert_receiver_code_is_linted_in_ci(workflow) -> None:
     backend = workflow["jobs"]["backend"]
-    assert step(backend, "Lint")["run"] == "uv run ruff check . ../deploy/aws/gateway"
-    assert (
-        step(backend, "Format check")["run"] == "uv run ruff format --check . ../deploy/aws/gateway"
-    )
+    paths = ". ../deploy/aws/gateway ../deploy/observability/alert-receiver"
+    assert step(backend, "Lint")["run"] == f"uv run ruff check {paths}"
+    assert step(backend, "Format check")["run"] == f"uv run ruff format --check {paths}"
 
 
 def test_every_action_is_pinned_to_a_commit(workflow) -> None:
