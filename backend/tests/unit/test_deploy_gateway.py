@@ -933,6 +933,69 @@ def test_an_oversized_body_is_refused(server, fake_deployer) -> None:
     assert fake_deployer.runs == []
 
 
+def raw_request(path: Path, head: bytes, body: bytes = b"", delay: float = 0.0) -> bytes:
+    """Sends the request head, then (after ``delay``) its body, like a slow client or proxy.
+
+    Returns the response's status line. Raises BrokenPipeError if the gateway closed the
+    connection before the body it was told about arrived.
+    """
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(10)
+        sock.connect(str(path))
+        sock.sendall(head)
+        if body:  # even an empty send fails on a connection the gateway already closed
+            time.sleep(delay)
+            sock.sendall(body)
+        response = b""
+        while chunk := sock.recv(65536):
+            response += chunk
+    return response.split(b"\r\n", 1)[0]
+
+
+def head(method: str, target: str, length: int, content_type: str = "application/json") -> bytes:
+    return (
+        f"{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {content_type}\r\n"
+        f"Content-Length: {length}\r\n\r\n"
+    ).encode()
+
+
+@pytest.mark.parametrize(
+    ("method", "target", "content_type", "size", "status"),
+    [
+        ("POST", "/api/health", "application/json", 2, b"404"),
+        ("POST", "/_deploy/status", "application/json", 2, b"404"),
+        ("POST", "/_deploy", "text/plain", 2, b"415"),
+        ("POST", "/_deploy", "application/json", 5000, b"413"),
+        ("PUT", "/_deploy", "application/json", 2, b"405"),
+    ],
+)
+def test_early_answers_wait_for_the_declared_body(
+    server, method, target, content_type, size, status
+) -> None:
+    # Regression: these answers come without using the body. The gateway used to answer and
+    # close at once, so a body still on its way failed with BrokenPipeError (a flaky
+    # test_only_the_deploy_route_exists; behind Caddy, a 502 instead of the answer).
+    line = raw_request(server, head(method, target, size, content_type), b"x" * size, delay=0.3)
+    assert line.startswith(b"HTTP/1.0 " + status + b" "), line
+
+
+def test_a_body_too_large_to_discard_is_not_waited_for(server) -> None:
+    started = time.monotonic()
+    line = raw_request(server, head("POST", "/_deploy", 10_000_000))  # and no body at all
+    assert line.startswith(b"HTTP/1.0 413")
+    assert time.monotonic() - started < 5
+
+
+def test_a_client_that_never_sends_its_body_is_answered_after_the_timeout(
+    server, monkeypatch
+) -> None:
+    monkeypatch.setattr(gw._Handler, "timeout", 0.5)
+    started = time.monotonic()
+    line = raw_request(server, head("POST", "/api/health", 100))  # declares 100 bytes, sends 0
+    assert line.startswith(b"HTTP/1.0 404")
+    assert time.monotonic() - started < 5
+
+
 def test_a_deploy_over_http(server, gateway, fake_deployer) -> None:
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {sign(claims())}"}
     status, response_headers, answer = http_request(
