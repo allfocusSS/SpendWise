@@ -1,0 +1,15 @@
+# Grafana provisioning for the local dashboard stack (compose.dashboard.yaml, docs/observability.md).
+# Mounted over grafana/otel-lgtm's own custom provider file; it loads every dashboard JSON in
+# deploy/observability/grafana/dashboards/ into the "SpendWise" folder. The dashboards live in
+# Git only: changes made in the UI are not saved.
+apiVersion: 1
+providers:
+  - name: spendwise
+    folder: SpendWise
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /otel-lgtm/grafana/conf/provisioning/dashboards/custom
+      foldersFromFilesStructure: false

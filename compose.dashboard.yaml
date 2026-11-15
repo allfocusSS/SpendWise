@@ -1,0 +1,69 @@
+# Local dashboard stack, for development and demos only: the API sends traces, metrics and logs
+# over OTLP/HTTP to Grafana's all-in-one LGTM image (an OpenTelemetry Collector, Prometheus, Loki,
+# Tempo and Grafana), which shows the SpendWise dashboard (docs/observability.md, "Dashboard").
+#
+#   docker compose -f compose.yaml -f compose.override.yaml -f compose.dashboard.yaml up -d --build
+#   open http://127.0.0.1:3000/d/spendwise-overview
+#   docker compose -f compose.yaml -f compose.override.yaml -f compose.dashboard.yaml down -v
+#
+# Never used on AWS or Render: the image needs well over 1 GiB of memory, which the production
+# t3.micro doesn't have. Only Grafana is published, on 127.0.0.1; the OTLP receiver, Prometheus,
+# Loki and Tempo are reachable from the app only. Independent of compose.observability.yaml.
+
+services:
+  app:
+    environment:
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
+      # Every trace locally; deployed environments choose a share (docs/observability.md).
+      OTEL_TRACES_SAMPLE_RATIO: "1.0"
+      # Short export intervals, so the dashboard moves within seconds of a request.
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      OTEL_BSP_SCHEDULE_DELAY: "1000"
+    networks: [default, dashboard]
+    depends_on:
+      # Started first so the app's first telemetry has somewhere to go. Not a health dependency:
+      # the app serves requests whether or not LGTM is up.
+      lgtm:
+        condition: service_started
+
+  lgtm:
+    # Official image, pinned by version and multi-architecture digest.
+    image: grafana/otel-lgtm:0.41.0@sha256:2e3290657f2f2a256c7a9175f097424a3ac5b54840741ace433e108e109348b6
+    ports:
+      # Grafana only, and on the loopback interface only. GRAFANA_PORT lets tests use another one.
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    environment:
+      # The app is instrumented explicitly: no eBPF auto-instrumentation.
+      ENABLE_OBI: "false"
+      # Prometheus adds a zero at each counter's OTLP start time, so a counter's first increase
+      # (the first requests to a route, the first transaction after a restart) shows in rate()
+      # and increase() instead of being taken as its starting value.
+      PROMETHEUS_EXTRA_ARGS: --enable-feature=created-timestamp-zero-ingestion
+      # Anyone on this machine may look (and use Explore), but not change anything without
+      # signing in (admin / admin, Grafana asks to change it). The dashboard is in Git anyway.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_VIEWERS_CAN_EDIT: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/custom/spendwise-overview.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+    volumes:
+      - ./deploy/observability/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro
+      - ./deploy/observability/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/custom:ro
+    healthcheck:
+      # The image's own check: Grafana, Prometheus, Loki, Tempo and the Collector all ready.
+      test: ["CMD", "/otel-lgtm/docker/healthcheck.sh"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    networks: [dashboard]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+networks:
+  # The app and LGTM only (the database stays on "default"). Not internal: Grafana's port needs a
+  # regular bridge network to be published (on 127.0.0.1 only).
+  dashboard: {}

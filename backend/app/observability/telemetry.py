@@ -26,7 +26,11 @@ from opentelemetry.sdk.trace.sampling import ParentBased, Sampler, TraceIdRatioB
 
 from app.core.config import Settings
 from app.observability.logs import APP_LOGGER
-from app.observability.privacy import HTTP_METRIC_ATTRIBUTES, RedactingSpanProcessor
+from app.observability.privacy import (
+    APPLICATION_METRIC_ATTRIBUTES,
+    HTTP_METRIC_ATTRIBUTES,
+    RedactingSpanProcessor,
+)
 
 log = logging.getLogger(__name__)
 
@@ -154,8 +158,12 @@ def build_telemetry(
     meter_provider = MeterProvider(
         resource=resource,
         metric_readers=list(metric_readers),
-        # HTTP server metrics keep only bounded attributes, whatever the instrumentation adds.
-        views=[View(instrument_name="http.server.*", attribute_keys=set(HTTP_METRIC_ATTRIBUTES))],
+        # HTTP server metrics and SpendWise's own keep only bounded attributes, whatever the
+        # instrumentation or a caller adds.
+        views=[
+            View(instrument_name="http.server.*", attribute_keys=set(HTTP_METRIC_ATTRIBUTES)),
+            View(instrument_name="spendwise.*", attribute_keys=set(APPLICATION_METRIC_ATTRIBUTES)),
+        ],
         shutdown_on_exit=False,
     )
 

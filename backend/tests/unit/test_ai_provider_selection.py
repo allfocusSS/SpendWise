@@ -25,7 +25,7 @@ def test_default_is_fake_and_needs_no_key() -> None:
 
     assert config.ai_provider == "fake"
     assert config.anthropic_api_key is None
-    assert isinstance(build_ai_provider(config), FakeAIProvider)
+    assert isinstance(build_ai_provider(config).wrapped, FakeAIProvider)  # measured
 
 
 def test_provider_is_selected_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,7 +33,7 @@ def test_provider_is_selected_from_environment(monkeypatch: pytest.MonkeyPatch) 
     assert settings().ai_provider == "anthropic"
 
     monkeypatch.setenv("AI_PROVIDER", "fake")
-    assert isinstance(build_ai_provider(settings()), FakeAIProvider)
+    assert isinstance(build_ai_provider(settings()).wrapped, FakeAIProvider)
 
 
 @pytest.mark.parametrize("value", ["Fake", " FAKE ", "fake\n"])

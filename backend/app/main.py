@@ -15,6 +15,7 @@ from app.observability import (
     setup_telemetry,
     shutdown_telemetry,
 )
+from app.observability import metrics as app_metrics
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
         mount_frontend(app, settings.frontend_dist)
     if telemetry is not None:
         instrument_app(app, telemetry)
+        app_metrics.initialize(settings.ai_provider)  # zero series for the dashboard (metrics.py)
     return app
 
 

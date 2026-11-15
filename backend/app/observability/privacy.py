@@ -8,7 +8,8 @@ OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_* variables) or a newer version record
   before they leave the process (RedactingSpanProcessor);
 - exceptions recorded on spans keep their type only: no message, no stack trace, no status
   description;
-- HTTP metrics keep only a fixed set of bounded attributes (HTTP_METRIC_ATTRIBUTES).
+- HTTP metrics keep only a fixed set of bounded attributes (HTTP_METRIC_ATTRIBUTES), and so do
+  SpendWise's own metrics (APPLICATION_METRIC_ATTRIBUTES).
 """
 
 from opentelemetry.context import Context
@@ -56,6 +57,19 @@ HTTP_METRIC_ATTRIBUTES = frozenset(
         "url.scheme",
         "network.protocol.name",
         "network.protocol.version",
+    }
+)
+
+
+# The only attributes SpendWise's own metrics (spendwise.*, metrics.py) may have. Each value comes
+# from a closed set: the transaction type and source of the validated request, the AI provider's
+# name from a fixed list, and metrics.ErrorType.
+APPLICATION_METRIC_ATTRIBUTES = frozenset(
+    {
+        "spendwise.transaction.type",
+        "spendwise.transaction.source",
+        "spendwise.ai.provider",
+        "error.type",
     }
 )
 

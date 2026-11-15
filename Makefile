@@ -1,6 +1,6 @@
 # Developer shortcuts. Each target is also documented in README.md as a plain command.
 
-.PHONY: integration e2e observability
+.PHONY: integration e2e observability dashboard
 
 # Integration tests against the real Docker Compose stack (built frontend, FastAPI, PostgreSQL).
 # Needs Docker (with Compose v2) and uv. Builds and starts its own isolated stack on port 18000,
@@ -22,3 +22,12 @@ e2e:
 # removed afterwards. Extra pytest arguments: make observability ARGS="-x"
 observability:
 	cd backend && uv run pytest observability_smoke $(ARGS)
+
+# The dashboard, end to end: the same stack plus Grafana's LGTM image (compose.dashboard.yaml).
+# Real traffic, including controlled failures, then checks that SpendWise's metrics reached
+# Prometheus with exact counts, that the dashboard is provisioned and its queries work, and that
+# logs reach Loki and traces Tempo. Needs Docker and uv (the image is about 1 GB); its own stack
+# (app on 18300, Grafana on 127.0.0.1:13000), removed afterwards. Extra pytest arguments:
+# make dashboard ARGS="-x"
+dashboard:
+	cd backend && uv run pytest dashboard_smoke $(ARGS)
