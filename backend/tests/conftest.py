@@ -8,6 +8,11 @@ os.environ["AI_PROVIDER"] = "fake"
 os.environ["ANTHROPIC_API_KEY"] = ""
 # The backend serves no frontend in tests unless a test mounts one (see test_frontend_serving.py).
 os.environ["FRONTEND_DIST"] = ""
+# An explicit environment, and no deployed version, whatever the shell says (test_meta_api.py and
+# test_app_environment.py set their own).
+os.environ["APP_ENV"] = "test"
+os.environ["APP_VERSION"] = ""
+os.environ["RENDER_GIT_COMMIT"] = ""
 
 from collections.abc import Iterator  # noqa: E402
 

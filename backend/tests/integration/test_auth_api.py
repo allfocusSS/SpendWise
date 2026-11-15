@@ -205,7 +205,7 @@ def test_https_requests_get_a_secure_cookie_even_if_configured_for_http(
     engine, monkeypatch: pytest.MonkeyPatch, app: FastAPI
 ) -> None:
     # A plain-HTTP setting (as in the local Compose stack) must not weaken an HTTPS deployment.
-    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h/d")  # production requires PostgreSQL
     monkeypatch.setenv("SESSION_COOKIE_SECURE", "false")
     get_settings.cache_clear()
@@ -345,6 +345,8 @@ def test_me_returns_only_public_fields(client: TestClient) -> None:
 PUBLIC = {
     ("get", "/api/health"),
     ("get", "/api/health/ready"),
+    # Environment and commit only (test_meta_api.py), for the promotion workflow.
+    ("get", "/api/meta"),
     ("post", "/api/auth/signup"),
     ("post", "/api/auth/login"),
     ("post", "/api/auth/logout"),

@@ -14,7 +14,8 @@ Isolation from anything on the developer's machine:
 - `docker compose` runs with a scrubbed environment and `--env-file` pointing at an empty file,
   so neither a repo-root `.env` nor shell variables such as POSTGRES_PASSWORD or COMPOSE_FILE can
   change the stack under test;
-- a fresh random database password for every run (nothing secret is committed).
+- a fresh random database password for every run (nothing secret is committed), and a random
+  stand-in commit SHA as APP_VERSION, which the app must report as its version.
 
 Settings (all optional), read from the environment of the test run:
 
@@ -85,6 +86,8 @@ class Stack:
     timeout: int = 600
     keep: bool = False
     db_password: str = field(default_factory=lambda: secrets.token_hex(16))
+    # 40 lowercase hex characters, like the commit SHA a real deploy passes (compose.yaml).
+    app_version: str = field(default_factory=lambda: secrets.token_hex(20))
     # Filled by record_startup() right after the first `up`.
     db_first_healthy: datetime | None = None
     # Logs of containers that were already removed (a restart replaces them), oldest first.
@@ -114,6 +117,7 @@ class Stack:
             POSTGRES_DB="spendwise",
             POSTGRES_USER="spendwise",
             POSTGRES_PASSWORD=self.db_password,
+            APP_VERSION=self.app_version,
             APP_PORT=str(self.port),
             SPENDWISE_IMAGE=self.image,
             AI_PROVIDER="fake",

@@ -11,6 +11,12 @@ services:
     image: spendwise:aws
     # Still not published: only Caddy reaches the app, so the forwarded headers it trusts
     # (X-Forwarded-Proto: https) always come from Caddy.
+    environment:
+      # This instance is PRODUCTION (docs/environments.md); development is Render. APP_VERSION
+      # comes from compose.yaml: the deploy wrapper exports the exact SHA it deploys.
+      APP_ENV: production
+      # The database is the db container on this instance (DATABASE_URL in compose.yaml), never
+      # development's Render database.
 
   caddy:
     image: caddy:2.11

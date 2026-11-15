@@ -38,9 +38,22 @@ def test_postgres_is_not_published_and_app_only_on_loopback(stack: Stack) -> Non
 def test_app_uses_postgresql(stack: Stack) -> None:
     env = dict(item.split("=", 1) for item in stack.inspect("app")["Config"]["Env"])
 
-    assert env["ENVIRONMENT"] == "production"
+    # compose.yaml says production; the local override (which this stack uses) says local.
+    assert env["APP_ENV"] == "local"
     assert env["DATABASE_URL"].startswith("postgresql+psycopg://")
     assert env["DATABASE_URL"].endswith("@db:5432/spendwise")
+
+
+def test_the_deployed_commit_reaches_the_app(stack: Stack, http) -> None:
+    # compose.yaml passes APP_VERSION from the deploy's environment into the container, and the
+    # app reports exactly that commit.
+    env = dict(item.split("=", 1) for item in stack.inspect("app")["Config"]["Env"])
+    assert env["APP_VERSION"] == stack.app_version
+
+    response = http().get("/api/meta")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {"environment": "local", "version": stack.app_version}
 
 
 @pytest.mark.parametrize("path", ["/api/health", "/api/health/ready"])
