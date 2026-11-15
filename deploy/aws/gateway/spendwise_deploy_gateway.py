@@ -65,6 +65,9 @@ LEEWAY = 60  # seconds of clock skew allowed for exp, nbf and iat
 MAX_TOKEN_AGE = 600  # a token must have been issued within the last ten minutes
 REPLAY_GRACE = 86400  # used token IDs are kept this long after the token expires
 MAX_BODY = 1024
+# A declared request body up to this size is read, unused, before an early answer (see
+# _Handler._discard_unread_body); a larger one is not.
+MAX_DISCARD = 64 * 1024
 MAX_TOKEN = 8192
 MAX_DOCUMENT = 1024 * 1024  # discovery and JWKS documents
 KEYS_TTL = 3600.0  # GitHub's keys are fetched again after an hour
@@ -739,6 +742,19 @@ class Gateway:
         )
 
 
+class _CountingReader:
+    """The request body stream, counting what the gateway read from it."""
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self._stream = stream
+        self.consumed = 0
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._stream.read(size)
+        self.consumed += len(data)
+        return data
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     server_version = "spendwise-deploy-gateway"
     sys_version = ""
@@ -752,17 +768,45 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         log.info("%s", (format % args)[:300])
 
     def do_POST(self) -> None:
+        body = _CountingReader(self.rfile)
         try:
-            code, payload = self.server.gateway.handle_post(self.path, self.headers, self.rfile)
+            code, payload = self.server.gateway.handle_post(self.path, self.headers, body)
         except Exception:
             log.exception("Deploy request failed")
             code, payload = 500, {"status": "error"}
+        self._discard_unread_body(body.consumed)
         self._send(code, payload)
 
     def _method_not_allowed(self) -> None:
+        self._discard_unread_body(0)
         self._send(405, {"status": "method_not_allowed"}, {"Allow": "POST"})
 
     do_GET = do_HEAD = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = do_TRACE = _method_not_allowed
+
+    def _discard_unread_body(self, consumed: int) -> None:
+        """Read the rest of the declared body, if any, before an early answer.
+
+        Answers such as 404, 405, 411, 413 and 415 come before (or without) reading the body, and
+        the connection closes after every answer. Closing while the client is still sending the
+        body it declared breaks that write (EPIPE on a Unix socket), so the client, Caddy, never
+        sees the answer and reports an error instead. Bounded: a declared body over MAX_DISCARD
+        is not read (that client gets the answer and a closed connection), and the connection's
+        timeout stops a client that never sends what it declared.
+        """
+        length = self.headers.get("Content-Length") or ""
+        if self.headers.get("Transfer-Encoding") or not length.isdigit():
+            return
+        remaining = int(length) - consumed
+        if not 0 < remaining <= MAX_DISCARD:
+            return
+        try:
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except TimeoutError:
+            pass  # the client stalled; answer anyway, then close
 
     def _send(
         self, code: int, payload: dict[str, Any], headers: Mapping[str, str] | None = None
