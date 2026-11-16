@@ -10,13 +10,17 @@ import { Sparkline } from '../components/Sparkline'
 import { TransactionTable } from '../components/TransactionList'
 import { Button, EmptyState, ErrorState, InlineError, linkClass, MiniBars, Section, Skeleton, SkeletonRows, SplitBar } from '../components/ui'
 import { ON_DARK, SERIES } from '../lib/chartColors'
-import { endOfMonth, formatMonth, toIsoDate } from '../lib/dates'
+import { addMonths, endOfMonth, formatMonth, monthKey, shownMonth, stepMonth, toIsoDate, trendWindow } from '../lib/dates'
 import { formatKzt } from '../lib/money'
 import { cardClass, labelClass } from '../lib/styles'
 import { transactionCount } from '../lib/text'
 import { useTransactionDialog } from '../lib/transactionDialog'
+import { useToday } from '../lib/useToday'
 
 type SummaryQuery = { data?: Summary; isError: boolean; error: unknown; refetch: () => unknown }
+
+/** Length of the monthly history (cash flow, sparkline, mini bars). It ends with the shown month. */
+const HISTORY_MONTHS = 6
 
 function monthRange(start: Date) {
   return { date_from: toIsoDate(start), date_to: toIsoDate(endOfMonth(start)) }
@@ -35,33 +39,40 @@ function Figure({ cents, signClassName = 'text-ink-subtle' }: { cents: number; s
 
 export function DashboardPage() {
   const openTransaction = useTransactionDialog()
-  const [now] = useState(() => new Date()) // captured once, so renders stay pure
-  const [offset, setOffset] = useState(0) // 0 = this month, -1 = last month, …
+  const today = useToday() // moves on at midnight, so a tab left open never shows yesterday
+  // The month the user went back to ("YYYY-MM"), or null for the current month.
+  const [selected, setSelected] = useState<string | null>(null)
 
-  const start = new Date(now.getFullYear(), now.getMonth() + offset, 1)
-  const previousStart = new Date(start.getFullYear(), start.getMonth() - 1, 1)
+  const start = shownMonth(selected, today)
+  const previousStart = addMonths(start, -1)
   const range = monthRange(start)
   const monthName = start.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })
   const monthShort = start.toLocaleDateString('en-GB', { month: 'short' })
   const previousShort = previousStart.toLocaleDateString('en-GB', { month: 'short' })
+  const history = `${HISTORY_MONTHS} months to ${formatMonth(monthKey(start))}`
 
   const allTime = useSummary()
   const month = useSummary(range)
   const previous = useSummary(monthRange(previousStart))
-  const trend = useMonthlyTrend({ months: 6 })
+  const trend = useMonthlyTrend(trendWindow(start, HISTORY_MONTHS))
   const expenses = useCategoryBreakdown({ type: 'expense', ...range })
   const recent = useTransactions({ limit: 8 })
 
-  const today = now.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+  const todayLabel = today.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
 
   return (
     <>
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-title text-ink">Overview</h1>
-          <p className="mt-1 text-sm text-ink-muted">{today}</p>
+          <p className="mt-1 text-sm text-ink-muted">{todayLabel}</p>
         </div>
-        <MonthSelector label={monthName} onPrevious={() => setOffset((o) => o - 1)} onNext={() => setOffset((o) => o + 1)} canGoNext={offset < 0} />
+        <MonthSelector
+          label={monthName}
+          onPrevious={() => setSelected((current) => stepMonth(current, today, -1))}
+          onNext={() => setSelected((current) => stepMonth(current, today, 1))}
+          canGoNext={monthKey(start) < monthKey(today)}
+        />
       </div>
 
       {/* Hero: balance anchor + solid income/expense cards + net savings */}
@@ -75,6 +86,7 @@ export function DashboardPage() {
           trendValues={trend.data?.months.map((m) => m.net_cents)}
           trendLabels={trend.data?.months.map((m) => formatMonth(m.month, true))}
           trendFailed={trend.isError}
+          history={history}
         />
         <SolidCard
           tone="income"
@@ -84,6 +96,8 @@ export function DashboardPage() {
           period={monthName}
           history={trend.data?.months.map((m) => m.income_cents)}
           historyFailed={trend.isError}
+          historyLabel={history}
+          historyShort={`${HISTORY_MONTHS} months to ${monthShort}`}
         />
         <SolidCard
           tone="expense"
@@ -93,13 +107,15 @@ export function DashboardPage() {
           period={monthName}
           history={trend.data?.months.map((m) => m.expense_cents)}
           historyFailed={trend.isError}
+          historyLabel={history}
+          historyShort={`${HISTORY_MONTHS} months to ${monthShort}`}
         />
         <NetCard query={month} monthName={monthName} />
       </div>
 
       {/* Cash flow and spending share one panel, split by a hairline. */}
       <div className={`${cardClass} mt-4 grid grid-cols-1 divide-y divide-line xl:grid-cols-12 xl:divide-x xl:divide-y-0`}>
-        <PanelSection title="Cash flow" subtitle="Income, expenses and net · last 6 months" action={<ChartLegend net />} className="xl:col-span-8">
+        <PanelSection title="Cash flow" subtitle={`Income, expenses and net · ${history}`} action={<ChartLegend net />} className="xl:col-span-8">
           {trend.isError ? (
             <ErrorState error={trend.error} onRetry={() => trend.refetch()} />
           ) : trend.isPending ? (
@@ -209,7 +225,7 @@ function MonthSelector({ label, onPrevious, onNext, canGoNext }: {
 }
 
 /** The anchor: all-time balance, with real supporting figures only. */
-function BalanceCard({ query, month, previous, monthShort, previousShort, trendValues, trendLabels, trendFailed }: {
+function BalanceCard({ query, month, previous, monthShort, previousShort, trendValues, trendLabels, trendFailed, history }: {
   query: SummaryQuery
   month: SummaryQuery
   previous: SummaryQuery
@@ -218,6 +234,8 @@ function BalanceCard({ query, month, previous, monthShort, previousShort, trendV
   trendValues?: number[]
   trendLabels?: string[]
   trendFailed: boolean
+  /** "6 months to Nov 2026": the window the sparkline shows. */
+  history: string
 }) {
   const data = query.data
   return (
@@ -251,10 +269,10 @@ function BalanceCard({ query, month, previous, monthShort, previousShort, trendV
       </div>
 
       <div className="mt-7 flex-1">
-        <p className={`${labelClass} mb-3`}>Monthly net, last 6 months</p>
+        <p className={`${labelClass} mb-3`}>Monthly net, {history}</p>
         {trendValues ? (
           <>
-            <Sparkline values={trendValues} color={SERIES.net} label="Monthly net, last 6 months" className="h-24 w-full text-ink-subtle" />
+            <Sparkline values={trendValues} color={SERIES.net} label={`Monthly net, ${history}`} className="h-24 w-full text-ink-subtle" />
             <div className="mt-2 flex justify-between text-xs text-ink-subtle" aria-hidden="true">
               {trendLabels?.map((l, i) => <span key={i}>{l}</span>)}
             </div>
@@ -293,7 +311,7 @@ function BalanceCard({ query, month, previous, monthShort, previousShort, trendV
 }
 
 /** Solid emerald / coral KPI card with a 6-month column history (both from the backend). */
-function SolidCard({ tone, label, query, value, period, history, historyFailed }: {
+function SolidCard({ tone, label, query, value, period, history, historyFailed, historyLabel, historyShort }: {
   tone: 'income' | 'expense'
   label: string
   query: SummaryQuery
@@ -301,6 +319,9 @@ function SolidCard({ tone, label, query, value, period, history, historyFailed }
   period: string
   history?: number[]
   historyFailed: boolean
+  /** "6 months to Nov 2026" (for screen readers) and "6 months to Nov" (on the card). */
+  historyLabel: string
+  historyShort: string
 }) {
   return (
     <section
@@ -321,9 +342,9 @@ function SolidCard({ tone, label, query, value, period, history, historyFailed }
         <p className="mt-2 text-xs text-white/90">{period}</p>
       </div>
       <div className="mt-auto flex items-end justify-between gap-4 border-t border-white/15 pt-4">
-        <span className="text-xs whitespace-nowrap text-white/90">Last 6 months</span>
+        <span className="text-xs whitespace-nowrap text-white/90">{historyShort}</span>
         {history ? (
-          <MiniBars values={history} color={ON_DARK} label={`${label}, last 6 months`} className="h-9 w-28" restOpacity={0.32} lastOpacity={0.9} />
+          <MiniBars values={history} color={ON_DARK} label={`${label}, ${historyLabel}`} className="h-9 w-28" restOpacity={0.32} lastOpacity={0.9} />
         ) : historyFailed ? (
           <span className="text-xs text-white/90">Unavailable</span>
         ) : (

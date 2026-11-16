@@ -1,16 +1,17 @@
 import { useState } from 'react'
 
-import type { Summary } from '../api/client'
+import type { MonthlyTrend, Summary } from '../api/client'
 import { useCategoryBreakdown, useMonthlyTrend, useSummary } from '../api/queries'
 import { CategorySplit } from '../components/CategoryBreakdownList'
 import { ChartEmpty, ChartLegend, ChartSkeleton, LazyCashFlowChart, LazyNetBarsChart } from '../components/LazyCharts'
 import { SummaryTiles } from '../components/SummaryTiles'
 import { Card, ErrorState, PageHeader, Segmented, Skeleton, SkeletonRows } from '../components/ui'
 import { SERIES } from '../lib/chartColors'
-import { PERIODS, periodRange, type DateRange, type PeriodKey } from '../lib/dates'
+import { formatDateRange, formatMonthSpan, PERIODS, periodRange, trendWindow, type DateRange, type PeriodKey } from '../lib/dates'
 import { formatKzt } from '../lib/money'
 import { cardClass, labelClass, inputClass } from '../lib/styles'
 import { transactionCount } from '../lib/text'
+import { useToday } from '../lib/useToday'
 
 type Selection = PeriodKey | 'custom'
 
@@ -19,7 +20,22 @@ const PERIOD_OPTIONS: { value: Selection; label: string }[] = [
   { value: 'custom', label: 'Custom' },
 ]
 
+/** The cash-flow and net charts: always the last 12 months, whatever period is selected. */
+const TREND_MONTHS = 12
+
+/**
+ * What the figures cover, with the exact dates sent to the API: "This month · 1–30 Nov 2026",
+ * "1 Mar – 30 Apr 2026", "From 1 Mar 2026", or "All time" (also for a custom range without dates,
+ * which the API answers for all time).
+ */
+function periodLabelFor(selection: Selection, range: DateRange): string {
+  if (selection === 'custom' || selection === 'all-time') return formatDateRange(range)
+  const name = PERIOD_OPTIONS.find((option) => option.value === selection)?.label ?? ''
+  return `${name} · ${formatDateRange(range)}`
+}
+
 export function AnalyticsPage() {
+  const today = useToday() // "This month" moves on at midnight in a tab left open
   const [selection, setSelection] = useState<Selection>('this-month')
   const [custom, setCustom] = useState<Required<DateRange>>({ date_from: '', date_to: '' })
 
@@ -28,8 +44,8 @@ export function AnalyticsPage() {
   const range: DateRange =
     selection === 'custom'
       ? { date_from: custom.date_from || undefined, date_to: custom.date_to || undefined }
-      : periodRange(selection)
-  const periodLabel = PERIOD_OPTIONS.find((option) => option.value === selection)?.label ?? ''
+      : periodRange(selection, today)
+  const periodLabel = periodLabelFor(selection, range)
 
   return (
     <>
@@ -56,15 +72,15 @@ export function AnalyticsPage() {
       )}
 
       {invalidCustom ? (
-        <TrendSection />
+        <TrendSection today={today} />
       ) : (
-        <PeriodAnalytics range={range} periodLabel={periodLabel} />
+        <PeriodAnalytics range={range} periodLabel={periodLabel} today={today} />
       )}
     </>
   )
 }
 
-function PeriodAnalytics({ range, periodLabel }: { range: DateRange; periodLabel: string }) {
+function PeriodAnalytics({ range, periodLabel, today }: { range: DateRange; periodLabel: string; today: Date }) {
   const summary = useSummary(range)
   const expenses = useCategoryBreakdown({ type: 'expense', ...range })
   const income = useCategoryBreakdown({ type: 'income', ...range })
@@ -75,7 +91,7 @@ function PeriodAnalytics({ range, periodLabel }: { range: DateRange; periodLabel
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
         <div className="xl:col-span-8">
-          <TrendSection />
+          <TrendSection today={today} />
         </div>
         <Comparison query={summary} periodLabel={periodLabel} />
       </div>
@@ -103,16 +119,37 @@ function PeriodAnalytics({ range, periodLabel }: { range: DateRange; periodLabel
         ))}
       </div>
 
-      <NetSection />
+      <NetSection today={today} />
     </div>
   )
 }
 
+/**
+ * The last 12 months to the browser's current month. Both charts ask for the same window, so they
+ * share one request; `until` keeps it on the local month, not the server's UTC one.
+ */
+function useRollingTrend(today: Date) {
+  return useMonthlyTrend(trendWindow(today, TREND_MONTHS))
+}
+
+/** "Last 12 months · Dec 2025 – Nov 2026", from the months the server actually returned. */
+function windowLabel(trend: MonthlyTrend | undefined): string {
+  const months = trend?.months ?? []
+  const span = months.length > 0 ? ` · ${formatMonthSpan(months[0].month, months[months.length - 1].month)}` : ''
+  return `Last ${TREND_MONTHS} months${span}`
+}
+
+/** Says, under a rolling chart, that the period picker above doesn't apply to it. */
+function RollingNote() {
+  return <p className="mb-2 text-xs text-ink-subtle">Not affected by the period selected above.</p>
+}
+
 /** Hero chart: 12 months of income and expenses with the net line. */
-function TrendSection() {
-  const trend = useMonthlyTrend({ months: 12 })
+function TrendSection({ today }: { today: Date }) {
+  const trend = useRollingTrend(today)
   return (
-    <Card title="Cash flow" subtitle="Income vs expenses · last 12 months" action={<ChartLegend net />} className="h-full">
+    <Card title="Cash flow" subtitle={windowLabel(trend.data)} action={<ChartLegend net />} className="h-full">
+      <RollingNote />
       {trend.isError ? (
         <ErrorState error={trend.error} onRetry={() => trend.refetch()} />
       ) : trend.isPending ? (
@@ -124,10 +161,11 @@ function TrendSection() {
   )
 }
 
-function NetSection() {
-  const trend = useMonthlyTrend({ months: 12 })
+function NetSection({ today }: { today: Date }) {
+  const trend = useRollingTrend(today)
   return (
-    <Card title="Net by month" subtitle="Income minus expenses, as calculated by the server · last 12 months">
+    <Card title="Net by month" subtitle={windowLabel(trend.data)}>
+      <RollingNote />
       {trend.isError ? (
         <ErrorState error={trend.error} onRetry={() => trend.refetch()} />
       ) : trend.isPending ? (
@@ -162,7 +200,7 @@ function Comparison({ query, periodLabel }: {
           <Skeleton className="h-10 w-full" />
         </div>
       ) : data.transaction_count === 0 ? (
-        <ChartEmpty height="h-56" title="Nothing to compare yet" description={`No transactions in “${periodLabel.toLowerCase()}”.`} />
+        <ChartEmpty height="h-56" title="Nothing to compare yet" description="No transactions in this period." />
       ) : (
         <div className="flex h-full flex-col">
           <ul className="flex flex-col gap-5 pt-2">
