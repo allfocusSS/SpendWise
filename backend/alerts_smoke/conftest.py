@@ -33,4 +33,6 @@ def stack(request: pytest.FixtureRequest) -> Iterator[Stack]:
 @pytest.fixture(scope="session")
 def grafana(stack: Stack) -> Iterator[httpx.Client]:
     with lgtm.grafana_client(stack) as client:
+        # Grafana's database and the provisioned Prometheus, Loki and Tempo data sources.
+        lgtm.wait_until_ready(client)
         yield client
