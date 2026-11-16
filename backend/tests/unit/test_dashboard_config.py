@@ -200,6 +200,8 @@ def test_only_grafana_is_published_and_only_on_loopback(overlay) -> None:
     assert lgtm["security_opt"] == ["no-new-privileges:true"]
     assert lgtm["environment"]["ENABLE_OBI"] == "false"  # no eBPF: the app is instrumented
     assert lgtm["environment"]["GF_AUTH_ANONYMOUS_ORG_ROLE"] == "Viewer"
+    # Only the pinned image's plugins: nothing downloaded or swapped in after start-up.
+    assert lgtm["environment"]["GF_PLUGINS_PREINSTALL_DISABLED"] == "true"
     # Never on the database's network; "alerting" reaches the alert receiver only.
     assert lgtm["networks"] == ["dashboard", "alerting"]
     for name, service in overlay["services"].items():

@@ -1,6 +1,6 @@
 # Developer shortcuts. Each target is also documented in README.md as a plain command.
 
-.PHONY: integration e2e observability dashboard alerts
+.PHONY: integration e2e observability dashboard alerts oncall
 
 # Integration tests against the real Docker Compose stack (built frontend, FastAPI, PostgreSQL).
 # Needs Docker (with Compose v2) and uv. Builds and starts its own isolated stack on port 18000,
@@ -40,3 +40,14 @@ dashboard:
 # afterwards. Takes about 5 minutes. Extra pytest arguments: make alerts ARGS="-x"
 alerts:
 	cd backend && uv run pytest alerts_smoke $(ARGS)
+
+# The AI on-call responder, end to end: the alerts stack plus the responder (compose.oncall.yaml).
+# The controlled AI outage fires "SpendWise AI Parse Failure Rate High"; the receiver hands the
+# incident to the responder with an HMAC signature; the responder collects bounded read-only
+# evidence from Prometheus, Loki and Tempo, asks the deterministic fake model, and stores a
+# structured advisory report. Also checks replay and bad-signature refusals, prompt-injection and
+# privacy canaries, and that the responder can do nothing but read. Needs Docker and uv; its own
+# stack (app on 18500, Grafana on 127.0.0.1:13200), removed afterwards. Takes about 4 minutes.
+# Extra pytest arguments: make oncall ARGS="-x"
+oncall:
+	cd backend && uv run pytest oncall_smoke $(ARGS)

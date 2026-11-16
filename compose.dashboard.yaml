@@ -53,6 +53,11 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      # Only the plugins in the pinned image. Otherwise Grafana downloads extra apps and newer
+      # versions of its bundled data source plugins from grafana.com after every start, and while
+      # it swaps one in (Prometheus, Loki and Tempo included), queries through that data source
+      # answer 404 "Unable to find datasource plugin" (docs/observability.md, "Dashboard").
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
     volumes:
       - ./deploy/observability/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro
       - ./deploy/observability/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/custom:ro

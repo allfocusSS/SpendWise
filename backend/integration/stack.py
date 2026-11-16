@@ -48,6 +48,8 @@ COMPOSE_FILES = (REPO_ROOT / "compose.yaml", REPO_ROOT / "compose.override.yaml"
 OBSERVABILITY_FILES = (*COMPOSE_FILES, REPO_ROOT / "compose.observability.yaml")
 # The same, plus Grafana's LGTM stack and the SpendWise dashboard (dashboard_smoke/).
 DASHBOARD_FILES = (*COMPOSE_FILES, REPO_ROOT / "compose.dashboard.yaml")
+# The same, plus the AI on-call responder (oncall_smoke/). It needs ONCALL_HMAC_SECRET.
+ONCALL_FILES = (*DASHBOARD_FILES, REPO_ROOT / "compose.oncall.yaml")
 
 # Only what the Docker CLI needs to find and talk to the daemon is passed through.
 PASSTHROUGH_ENV = (
@@ -90,9 +92,11 @@ class Stack:
     timeout: int = 600
     keep: bool = False
     compose_files: tuple[Path, ...] = COMPOSE_FILES
-    # Further variables for the Compose files (e.g. GRAFANA_PORT for the dashboard stack).
-    extra_env: dict[str, str] = field(default_factory=dict)
-    db_password: str = field(default_factory=lambda: secrets.token_hex(16))
+    # Further variables for the Compose files (e.g. GRAFANA_PORT for the dashboard stack, or the
+    # on-call signing secret). Not in the repr: pytest prints a failing test's fixtures, and that
+    # output goes to CI logs. The same for the database password.
+    extra_env: dict[str, str] = field(default_factory=dict, repr=False)
+    db_password: str = field(default_factory=lambda: secrets.token_hex(16), repr=False)
     # 40 lowercase hex characters, like the commit SHA a real deploy passes (compose.yaml).
     app_version: str = field(default_factory=lambda: secrets.token_hex(20))
     # Filled by record_startup() right after the first `up`.
@@ -260,6 +264,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="with Grafana's LGTM stack and the dashboard (compose.dashboard.yaml)",
     )
+    extras.add_argument(
+        "--oncall",
+        action="store_true",
+        help="with the AI on-call responder too (compose.oncall.yaml)",
+    )
     args = parser.parse_args(argv)
     command = args.command
     stack = Stack.from_env()
@@ -267,6 +276,11 @@ def main(argv: list[str] | None = None) -> int:
         stack.compose_files = OBSERVABILITY_FILES
     if args.dashboard:
         stack.compose_files = DASHBOARD_FILES
+    if args.oncall:
+        stack.compose_files = ONCALL_FILES
+        # Compose needs a value to read the files; `down` never uses it, and `up` here is only
+        # for a manual look (the tests generate their own).
+        stack.extra_env.setdefault("ONCALL_HMAC_SECRET", secrets.token_hex(32))
 
     if command == "logs":
         print(stack.logs(tail=500))

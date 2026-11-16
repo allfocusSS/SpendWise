@@ -1,0 +1,58 @@
+# The AI on-call responder, for development, demos and CI only: it adds to the dashboard stack
+# (compose.dashboard.yaml) a service that turns the alert receiver's incidents into advisory
+# reports from read-only evidence (docs/observability.md, "AI on-call responder").
+#
+#   export ONCALL_HMAC_SECRET=$(openssl rand -hex 32)      # any random string of 32+ characters
+#   docker compose -f compose.yaml -f compose.override.yaml -f compose.dashboard.yaml \
+#     -f compose.oncall.yaml up -d --build --wait
+#   docker compose ... exec oncall-responder cat /var/lib/oncall/reports.jsonl
+#   docker compose ... down -v
+#
+# Never used on AWS or Render. The responder is on the internal `alerting` network only (no
+# published port, no route to the host or the internet), runs without credentials, a Docker
+# socket or a writable root filesystem, and can only make GET requests to Prometheus, Loki and
+# Tempo. ONCALL_HMAC_SECRET authenticates the receiver to it; it comes from your environment,
+# never from Git, and there is no default.
+
+services:
+  alert-receiver:
+    environment:
+      ONCALL_RESPONDER_URL: http://oncall-responder:8090/incidents
+      ONCALL_HMAC_SECRET: ${ONCALL_HMAC_SECRET:?set ONCALL_HMAC_SECRET to a random string of at least 32 characters}
+
+  oncall-responder:
+    # The same pinned image as the receiver; the code is mounted read-only (standard library only).
+    image: python:3.13.18-alpine3.24@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e
+    command: ["python", "-B", "-u", "-m", "oncall_responder"]
+    working_dir: /app
+    user: "65534:65534"
+    read_only: true
+    environment:
+      ONCALL_HMAC_SECRET: ${ONCALL_HMAC_SECRET:?set ONCALL_HMAC_SECRET to a random string of at least 32 characters}
+      # "fake": the deterministic, offline model. No other model exists, and no API key is used.
+      ONCALL_MODEL: fake
+      # LGTM's backends, reachable on the internal network only.
+      PROMETHEUS_URL: http://lgtm:9090
+      LOKI_URL: http://lgtm:3100
+      TEMPO_URL: http://lgtm:3200
+      # Links in an incident must lead here; any other link is dropped.
+      ONCALL_GRAFANA_ORIGIN: http://127.0.0.1:${GRAFANA_PORT:-3000}
+    volumes:
+      - ./deploy/observability/oncall-responder:/app:ro
+    # The only writable place: the reports, in memory, gone with the container.
+    tmpfs:
+      - /var/lib/oncall:size=4m,mode=0700,uid=65534,gid=65534
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8090), 2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [alerting]
+    depends_on:
+      lgtm:
+        condition: service_started
+    restart: unless-stopped

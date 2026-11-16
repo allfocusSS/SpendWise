@@ -12,10 +12,14 @@ refused sign-ins.
     [SpendWise dashboard](#dashboard-grafana-lgtm-local) over Prometheus, Loki and Tempo
     (`make dashboard`);
   - the same Grafana evaluates SpendWise's [alert rules](#alerts-grafana-local) and notifies a
-    local webhook receiver (`make alerts`).
+    local webhook receiver (`make alerts`);
+  - an [AI on-call responder](#ai-on-call-responder-local) reads those incidents and writes
+    structured advisory reports (`make oncall`).
 - **Off by default**, and **not yet enabled in development (Render) or production (AWS)**. The
   alerting stack is local, demo and CI only: nothing pages anyone around the clock yet.
-- **Not done yet:** the [AI on-call responder](#next-the-ai-on-call-responder) is the next step.
+- **Also local, demo and CI only:** the [AI on-call responder](#ai-on-call-responder-local)
+  turns those alerts into advisory reports from read-only evidence (`make oncall`). It is not
+  24/7 paging, and it can recommend but never act.
 
 ```mermaid
 flowchart LR
@@ -45,6 +49,8 @@ flowchart LR
 | Alert rules, contact point, notification policy | `deploy/observability/grafana/alerting/` |
 | Alert receiver (webhook → normalized incidents) | `deploy/observability/alert-receiver/` |
 | Alerting end-to-end check | `backend/alerts_smoke/` (`make alerts`, CI job "Observability Alerts") |
+| AI on-call responder (incident → evidence → model → report) | `deploy/observability/oncall-responder/`, in `compose.oncall.yaml` |
+| AI on-call end-to-end check | `backend/oncall_smoke/` (`make oncall`, CI job "Observability AI On-call") |
 
 ## Signals
 
@@ -351,6 +357,19 @@ docker compose -f compose.yaml -f compose.override.yaml -f compose.dashboard.yam
     from the app's Docker network.
   - There is no eBPF instrumentation (`ENABLE_OBI=false`), no privileged mode and no host
     networking.
+- **Only the image's plugins** (`GF_PLUGINS_PREINSTALL_DISABLED=true`). Otherwise Grafana
+  spends several minutes after every start downloading from grafana.com, one at a time: the
+  Drilldown apps (Metrics, Logs, Traces, Profiles), Grafana Advisor and the LLM app, plus newer
+  versions of the data source plugins the image bundles. While it swaps one of those in, queries
+  through that data source answer 404 "Unable to find datasource plugin" for about 100 ms (the
+  likely cause of an intermittent CI failure).
+  - The stack now runs exactly what the pinned image contains, the same every time, with nothing
+    downloaded. Explore, alerting, the dashboard's panels and the Prometheus, Loki and Tempo data
+    sources are all in the image.
+  - What that leaves out: the four Drilldown apps, Advisor and the LLM app. Nothing here uses
+    them.
+  - The tests also retry that one 404 for up to 15 s (`backend/integration/lgtm.py`), so a
+    Grafana that swaps plugins anyway doesn't fail them.
 - **AI parsing data:** no HTTP route calls AI parsing yet, so the demo traffic doesn't touch it.
   To see the AI panels move, run the real provider path in the app container, as the checks do:
   see [Watching an alert fire](#watching-an-alert-fire-demo) (`backend/integration/ai_traffic.py`).
@@ -504,17 +523,52 @@ is a poll against a deadline, never a fixed sleep. It:
   be `error`, and `datasource_error` incidents with the rule's severity and category to reach
   the receiver.
 
+`make oncall` (`backend/oncall_smoke/`) adds the responder to that stack (project
+`spendwise-oncall`, the app on port 18500, Grafana on 127.0.0.1:13200; about 2 minutes). It
+generates its own signing secret, and every wait is a poll against a deadline. It:
+
+- **chain:** fires the controlled AI outage and requires, in order, the failure ratio over its
+  threshold in Prometheus (the rule's own expression), Grafana's rule firing, the receiver's
+  incident, and a report whose incident is that very one (same fingerprint, rule, start and links);
+- **authentication:** requires the responder's "signature ok" and the receiver's "delivered"
+  lines for it, then, for a signed request sent from the receiver's container: accepted once; the
+  same request again refused as a replay (409); a wrong key, a changed body, a stale timestamp,
+  no signature and a broken signature all refused (401); a wrong content type, method and path
+  refused; and exactly one new report from all of that;
+- **evidence:** requires that every query the responder logged is in the allowlist, that each
+  report holds exactly its category's queries and all answered, and that the evidence is the real
+  data: a failure ratio over the threshold and provider-type errors from the `fake` provider,
+  within the bounds above;
+- **model:** requires the fake model invoked once per report, every answer accepted, and none
+  rejected or failed;
+- **report:** checks the three kinds of statement stay apart (observed evidence the responder
+  built, inferences that cite it with a certainty short of fact, recommendations that need a
+  human), and runs the responder's own `validate_report` on every stored report;
+- **injection and privacy:** sends a hostile log line and a hostile signed incident, as
+  described [above](#privacy-and-prompt-injection), and requires the hostile and the calm
+  incident to get identical analyses and no canary, secret or instruction in any report, log or
+  incident file;
+- **slow clients:** from the receiver's and the responder's containers, opens 16 connections
+  that start a request and never finish it against the other service; requires a 17th to be
+  answered 503 at once, every stalled one to be cut off at the 10 s deadline, the service to
+  answer normally afterwards, and no unexpected error in its log;
+- **no change:** requires Grafana's rules, contact point and policy to be exactly what they were
+  before, nothing new published, the responder's mounts, capabilities and environment to be as
+  declared, no resolvable app or database, no route to the internet, no writable path outside its
+  report directory, and only decision lines in its log.
+
 In CI:
 
 - **Jobs:**
   - **Observability (OpenTelemetry)** runs `make observability`;
   - **Observability Dashboard** runs `make dashboard`;
-  - **Observability Alerts** runs `make alerts`.
+  - **Observability Alerts** runs `make alerts`;
+  - **Observability AI On-call** runs `make oncall`.
 - **When:** every pull request and every push to `main`, in parallel.
-- **Required:** "All checks passed" requires all three, and so, through that check, does the
+- **Required:** "All checks passed" requires all four, and so, through that check, does the
   promotion workflow.
-- **Limits:** none of them has an OIDC token or deploys anything; each has the workflow's
-  read-only token only.
+- **Limits:** none of them has an OIDC token, a repository secret or a deployment; each has the
+  workflow's read-only token only. The AI on-call job makes up its own throwaway signing secret.
 - **On failure:** each uploads the run's container logs (Collector, LGTM and receiver output
   included).
 
@@ -548,7 +602,7 @@ flowchart LR
     prom --> rules["Grafana alert rules<br/>evaluated every 10 s"]
     rules -- "Normal → Pending → Alerting" --> am["Grafana Alertmanager<br/>notification policy"]
     am -- "webhook POST /alerts<br/>(internal 'alerting' network)" --> recv["alert-receiver<br/>normalized incidents"]
-    recv -. "next milestone" .-> ai["AI on-call responder"]
+    recv -- "signed handoff, with compose.oncall.yaml" --> ai["AI on-call responder"]
 ```
 
 **All of it is in Git.** `deploy/observability/grafana/alerting/` holds `rules.yaml`,
@@ -707,8 +761,11 @@ read-only in the official `python:3.13.18-alpine3.24` image (pinned by digest). 
 **Requests:**
 - `POST /alerts` only: other methods get 405, other paths 404;
 - `application/json` only (415);
-- a `Content-Length` is required (411), at most 256 KiB (413, refused before the body is read);
-- a client that stops sending for 5 s is dropped.
+- a `Content-Length` is required (411), ASCII digits only (400), at most 256 KiB (413, refused
+  before the body is read);
+- a client that stops sending for 5 s, or takes more than 10 s in all, is dropped, and at most
+  16 connections are open at once: the next is answered 503 at once (see
+  [Connection handling](#connection-handling-slow-and-malformed-clients)).
 
 **Payload:**
 - the JSON is parsed as data and must be Grafana's webhook format, version 1 (400 if malformed,
@@ -725,7 +782,15 @@ read-only in the official `python:3.13.18-alpine3.24` image (pinned by digest). 
 **Container:**
 - runs as `nobody` (65534), with a read-only root filesystem and all capabilities dropped;
 - `no-new-privileges`, a 64 MiB memory limit and 32 processes at most;
-- no Docker socket, no credentials and no environment.
+- no Docker socket and no credentials. With `compose.oncall.yaml` it has two settings, where the
+  responder is and the signing secret, and one outbound call (below); without it, none.
+
+**Handoff to the responder (only with `compose.oncall.yaml`):**
+- every normalized incident is POSTed, signed, to `http://oncall-responder:8090/incidents` from a
+  background thread, so Grafana never waits for it;
+- up to 3 attempts with 1 s and 2 s pauses, each signed afresh; a 4xx answer is final;
+- the log says whether it was delivered or refused, never what was in it;
+- the receiver still keeps its own copy of every incident, whether or not the handoff worked.
 
 **The webhook payload, as Grafana 13.3 really sends it** (captured from this stack). The
 complete payloads are `examples/grafana-firing.json` and `examples/grafana-resolved.json`:
@@ -752,7 +817,7 @@ complete payloads are `examples/grafana-firing.json` and `examples/grafana-resol
 }
 ```
 
-**The normalized incident** (`spendwise.incident.v1`) is the next milestone's input contract
+**The normalized incident** (`spendwise.incident.v1`) is the responder's input contract
 (`examples/incident-firing.json`). There is one incident per alert in a notification. Every field
 is bounded, and a missing or invalid field is `null`:
 
@@ -841,29 +906,326 @@ $COMPOSE logs alert-receiver
   - the incidents;
   - the receiver's log.
 
-## Next: the AI on-call responder
+## AI on-call responder (local)
 
-The next milestone makes an AI agent the on-call responder for these alerts. This one prepares
-for it and adds no AI:
+The responder is an advisory on-call analyst. When an alert fires, it reads the incident the
+[alert receiver](#the-alert-receiver) normalized, collects a small, fixed set of read-only
+evidence, asks a model, and stores a structured report for a human. It is part of
+`compose.oncall.yaml`, an overlay on the dashboard stack.
 
-- **Input:** the responder reads normalized incidents (`spendwise.incident.v1`, above), never
-  Grafana's raw JSON. The receiver is where it plugs in: today it only records incidents.
-- **Untrusted text:** treat `summary`, `description` and `runbook` as data, not instructions.
-  They come from the rules' templates, but the receiver can't prove who wrote them; it only
-  strips markup and bounds their length.
-- **Telling incidents apart:**
-  - `fingerprint` identifies an alert: firing, then resolved, with the same fingerprint;
-  - `kind` separates a real condition from a query that failed (`datasource_error`);
-  - `rule_uid`, `environment`, `value` and the links lead to the evidence: the dashboard panel,
-    then Loki and Tempo for that environment and time.
-- **Before it acts on anything:**
-  - authenticate the sender (Grafana's webhook supports HMAC signatures, with the secret from
-    the runtime environment, never Git);
-  - keep the receiver unpublished;
-  - decide what, if anything, it may change without a human.
-- **Production:** LGTM is not on the t3.micro, so production alerting needs the same rules
-  (same PromQL) in a managed backend's alerting, with the same contact point contract. Only
-  then will alerts run around the clock.
+**What it is, and isn't:**
+- **Local, demo and CI only.** It never runs on AWS or Render, and the alerting stack it depends
+  on isn't deployed either. This is **not 24/7 paging**: nothing here wakes anyone up.
+- **Advisory only.** It recommends; a human decides and approves every operational change. It has
+  no way to execute, deploy, commit, push, merge, change an alert, or write to a database.
+- **No paid or external AI.** The model is a deterministic fake that runs offline in the
+  container. `make oncall` needs no API key, and no key is stored in Git.
+
+```mermaid
+flowchart LR
+    metric["SpendWise metrics"] --> prom["Prometheus"]
+    prom --> rule["Grafana alert rule"]
+    rule -- "webhook" --> recv["alert-receiver<br/>validates and normalizes"]
+    recv -- "HMAC-signed POST /incidents<br/>(internal 'alerting' network)" --> v
+    subgraph resp["oncall-responder: read-only, no credentials, no route out"]
+        v["verify signature, replay, contract"] --> q["fixed evidence queries"]
+        q --> m["fixed prompt, evidence as data → model"]
+        m --> c["schema + content policy, or the fallback"]
+        c --> store["bounded report store"]
+    end
+    q -- "GET only" --> prom
+    q -- "GET only" --> loki["Loki"]
+    q -- "GET only" --> tempo["Tempo"]
+```
+
+### Trust boundaries
+
+| Boundary | What crosses it | What protects it |
+|---|---|---|
+| Grafana → receiver | the webhook JSON | the internal network; type, size and time limits; normalized to a fixed contract, nothing else kept |
+| receiver → responder | one normalized incident | an HMAC-SHA256 signature, a 5-minute clock window, a nonce accepted once, and the contract checked again |
+| responder → Prometheus, Loki, Tempo | fixed queries | GET only, three fixed base URLs and API paths, query templates where only the environment name is substituted, bounded replies |
+| telemetry → model | evidence | escaped data blocks; log lines only as counts or exact application messages; secrets and personal data scrubbed |
+| model → report | the model's JSON | a strict schema and a content policy; observed evidence comes from the responder, never the model; a deterministic fallback |
+| responder → host | the report file | one small tmpfs, bounded in count and bytes; nothing is published |
+
+### What it may and may not do
+
+| May | May not |
+|---|---|
+| verify one signed request type, `POST /incidents` | accept anything unsigned, replayed, stale or outside the incident contract |
+| `GET` three Prometheus, Loki and Tempo endpoints, with the queries listed below | run a query a model, a log line or an alert wrote; call any other URL, host or verb |
+| ask the configured model for JSON | let the model call tools, run commands, open URLs, read files or see secrets |
+| write its own report file (in memory) | write anywhere else: its code and root filesystem are read-only |
+| suggest commands or human actions in a report | execute them. Every action says `requires_human_approval: true` and `actions_executed` is always empty |
+| | deploy, touch AWS or Render, write to the database, call GitHub, use the Docker socket, read a secret, change or silence an alert |
+
+The container enforces what the code doesn't need to: it runs as `nobody` with a read-only root
+filesystem, all capabilities dropped, `no-new-privileges`, 128 MiB of memory and 32 processes, no
+published port, no Docker socket and no credential of any kind (its environment is its own
+settings, the signing secret included, plus the base image's standard variables such as `PATH`
+and `PYTHON_VERSION`). It is on the internal
+`alerting` network, which has no route to the internet, and it can't resolve the app or the
+database. `make oncall` checks each of those on the running container.
+
+### The handoff and its authentication
+
+The receiver signs every incident it hands over, and the responder checks:
+
+- **Headers:** `X-SpendWise-Timestamp` (Unix seconds), `X-SpendWise-Nonce` (32 random hex
+  characters) and `X-SpendWise-Signature` (`v1=` and the hex HMAC-SHA256).
+- **What is signed:** the version, method, path, timestamp, nonce and the SHA-256 of the body.
+  Changing any of them breaks the signature.
+- **Comparison:** `hmac.compare_digest`, in constant time.
+- **Clock:** a timestamp more than 5 minutes from the responder's clock is refused (401). The
+  two services must agree on the time to within that window. They share one Docker host, so
+  they do, but a laptop's host clock and Docker Desktop's VM clock can drift apart (the VM lags
+  after the Mac sleeps). Anything that signs from the host, such as a test, must read the
+  responder's own clock rather than its own; `make oncall` does.
+- **Replay:** a nonce is accepted once (409 the second time). The nonce is remembered only after
+  the signature checked out, so forged traffic can't fill the memory, and for exactly as long as
+  its timestamp could still be accepted. If more than 10,000 distinct requests fall inside the
+  window, the responder refuses new ones (503) rather than forget one that could be replayed.
+- **The answer doesn't say why** a request failed (just `unauthorized`); the log does.
+- **The secret** is `ONCALL_HMAC_SECRET`, at least 32 characters, read by both services from the
+  environment. There is no default: `compose.oncall.yaml` refuses to start without it, and nothing
+  in Git holds one. `make oncall` generates a random one per run (`SPENDWISE_ONCALL_HMAC_SECRET`
+  sets one by hand to reproduce a run). Rotate it by restarting both services with a new value.
+- **It isn't encryption.** The channel is plain HTTP on an internal Docker network; the signature
+  gives authenticity and integrity, not secrecy.
+- **What it authenticates.** The HMAC authenticates the alert receiver, not Grafana. The
+  responder can tell that an incident came from the receiver, and that nobody changed it on the
+  way. It can't tell that Grafana sent the alert behind it: the receiver's `/alerts` endpoint
+  takes any POST from the `alerting` network and signs whatever it normalizes. Grafana, LGTM's
+  other components (with the plugins its image ships) and the responder are on that
+  network, so anything running in LGTM could cause a forged but valid-looking incident. The
+  result would be an advisory report and a few bounded read-only queries: no code runs and
+  nothing changes. Closing that gap takes a credential between Grafana and the receiver, which
+  this milestone doesn't add; it needs a decision first.
+
+### Connection handling: slow and malformed clients
+
+The receiver and the responder run the same protections, so one bad client can't hold either up:
+
+- **A thread per connection, and a cap.** At most 16 connections are open at once. The 17th is
+  answered `503 busy` at once, not queued. The threads fit the containers' 32-process limit (16,
+  plus the main thread, the worker or handoff thread, and the reaper).
+- **A request deadline.** A request that is still open 10 s after it was accepted, however slowly
+  its headers or body arrive, is cut off by a reaper thread, and the log says so. The 5 s
+  per-read timeout alone could not do this: it restarts on every byte, so one byte every 4 s
+  held a connection for as long as the client liked.
+- **One signed request is accepted once, even sent many times at once.** The nonce store is
+  locked, so copies of the same request that arrive together can't all be "the first".
+- **`Content-Length` is ASCII digits only.** Anything else (a superscript `²`, other scripts'
+  digits, a sign, a space, an enormous number, two of them) is a `400 invalid Content-Length`,
+  not a dropped connection. A missing one is 411, and over the cap 413.
+- **Numbers.** A `value` that isn't finite, or is beyond 10^15, is refused (a 422 at the
+  responder; stored as `null` at the receiver), including integers too big to convert.
+- **An unexpected error in a handler is answered `500`** and logged by class only. Connections a
+  client abandons, or that the deadline cut, are not errors and print nothing. Tracebacks and
+  client addresses never reach the log.
+- **Errors don't echo the sender.** A request with the wrong fields is told how many were
+  unexpected, never their names, so nothing a sender chooses can reach a response or a log line.
+
+### The incident it accepts
+
+Only the receiver's `spendwise.incident.v1` (see [the alert receiver](#the-alert-receiver)),
+checked again: exactly those 21 fields (a missing or extra one is a 422), each with its type,
+allowed values and length. A fingerprint, severity and one of the four categories are required,
+the environment is a lowercase name, timestamps are real UTC dates, and the value is a finite
+number. Free text is made plain (no markup, no control characters), scrubbed and cut to length.
+Links are kept only if they lead to the configured Grafana (`ONCALL_GRAFANA_ORIGIN`). The model
+sees a bounded subset: status, alert, kind, severity, category, environment, summary,
+description, runbook, the measured value, the start and end, and the dashboard and panel links.
+Grafana's raw JSON never reaches it.
+
+### Evidence: sources, queries and bounds
+
+The category picks the queries; trusted code runs them. Nothing a model, a log line or an alert
+says can become a query, a URL or a trace ID. The only substitution is the environment name,
+which the incident contract limits to `[a-z0-9-]`.
+
+| Category | Query ID | Source | Query (`<environment>` is the incident's) |
+|---|---|---|---|
+| common | `common.version` | prometheus | `count by (service_version) (target_info{service_name="spendwise-api", deployment_environment_name="<environment>"})` |
+| common | `traces.errors` | tempo | `{resource.service.name="spendwise-api" && resource.deployment.environment.name="<environment>" && status=error}` |
+| http | `http.request_rate` | prometheus | `sum(rate(http_server_request_duration_seconds_count{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m]))` |
+| http | `http.error_ratio` | prometheus | `sum(rate(http_server_request_duration_seconds_count{service_name="spendwise-api", deployment_environment_name="<environment>", http_response_status_code=~"5.."}[5m])) / (sum(rate(http_server_request_duration_seconds_count{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m])) > 0)` |
+| http | `http.errors_by_route` | prometheus | `topk(5, sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name="spendwise-api", deployment_environment_name="<environment>", http_response_status_code=~"5.."}[5m])))` |
+| http | `http.p95_latency` | prometheus | `histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m])))` |
+| http | `http.active_requests` | prometheus | `sum(http_server_active_requests{service_name="spendwise-api", deployment_environment_name="<environment>"})` |
+| http | `logs.http` | loki | `{service_name="spendwise-api", deployment_environment_name="<environment>"} \| detected_level="error"` |
+| http | `traces.slow` | tempo | `{resource.service.name="spendwise-api" && resource.deployment.environment.name="<environment>" && duration > 1s}` |
+| transaction | `transaction.saved` | prometheus | `sum(increase(spendwise_transaction_created_total{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m]))` |
+| transaction | `transaction.failed_by_type` | prometheus | `sum by (error_type) (increase(spendwise_transaction_create_error_total{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m]))` |
+| transaction | `transaction.system_failure_ratio` | prometheus | `sum(increase(spendwise_transaction_create_error_total{service_name="spendwise-api", deployment_environment_name="<environment>", error_type=~"database\|internal"}[5m])) / ((sum(increase(spendwise_transaction_created_total{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m])) + sum(increase(spendwise_transaction_create_error_total{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m]))) > 0)` |
+| transaction | `logs.transaction` | loki | `{service_name="spendwise-api", deployment_environment_name="<environment>"} \| detected_level="error"` |
+| ai | `ai.requests` | prometheus | `sum by (spendwise_ai_provider) (increase(spendwise_ai_parse_request_total{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m]))` |
+| ai | `ai.errors_by_type` | prometheus | `sum by (spendwise_ai_provider, error_type) (increase(spendwise_ai_parse_error_total{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m]))` |
+| ai | `ai.failure_ratio` | prometheus | `sum(increase(spendwise_ai_parse_error_total{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m])) / (sum(increase(spendwise_ai_parse_request_total{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m])) > 0)` |
+| ai | `ai.p95_duration` | prometheus | `histogram_quantile(0.95, sum by (le) (rate(spendwise_ai_parse_duration_seconds_bucket{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m])))` |
+| ai | `logs.ai` | loki | `{service_name="spendwise-api", deployment_environment_name="<environment>"} \| detected_level="error"` |
+| auth | `auth.refused_per_minute` | prometheus | `sum(rate(spendwise_auth_sign_in_failure_total{service_name="spendwise-api", deployment_environment_name="<environment>"}[5m])) * 60` |
+| auth | `auth.login_request_rate` | prometheus | `sum(rate(http_server_request_duration_seconds_count{service_name="spendwise-api", deployment_environment_name="<environment>", http_route="/api/auth/login"}[5m]))` |
+| auth | `logs.auth` | loki | `{service_name="spendwise-api", deployment_environment_name="<environment>"} \|= "Sign-in refused" \| detected_level="warn"` |
+
+- **Metrics (Prometheus):** instant queries over 5 minutes; at most 5 series each, only
+  allowlisted labels with safe values (`service_version`, `http_route`, `error_type`, the AI
+  provider, the transaction type and source, the status code, the environment); non-finite
+  numbers dropped.
+- **Logs (Loki):** SpendWise's own service and environment only, the last 15 minutes, at most 20
+  lines, error level (warn for sign-ins). **Log text is counted, not quoted:** the model sees a
+  line only if it is exactly one of the application's own messages (`Sign-in refused: …`,
+  `Unhandled <type> in <method> <route template>`). Every other line, whatever it says, is
+  counted as "unrecognised" and never shown, and the report never holds a log line.
+- **Traces (Tempo):** the last 15 minutes, at most 5 traces: trace ID, root span name (a route
+  template), duration and start. No span attributes, and no trace is fetched.
+- **Limits:** 256 KiB and 5 s per backend reply, 25 s for the whole collection. A backend that
+  fails costs only its own evidence and is named in the report's limitations.
+- **A query that found nothing is not evidence.** One that answered with no rows (or no log
+  lines) is listed in the report (`available: true`, empty `data`) and shown to the model, but a
+  cause can't cite it and it doesn't raise the confidence. Only evidence that found something
+  counts, so the absence of data can't be turned into support for a conclusion.
+- **No environment, no evidence:** an incident without one (Grafana's own "query failed" alert)
+  collects nothing, because a query without an environment would mix environments.
+
+### Prompt, model and provider
+
+- **Fixed system prompt** (`prompt.py`), the same for every incident: the role, the rules and
+  the answer schema. Nothing from telemetry or the incident is ever in it.
+- **Data, not instructions.** The incident and the evidence are two JSON blocks between
+  `<<<INCIDENT_DATA>>>` and `<<<EVIDENCE_DATA>>>` markers. The JSON is ASCII-escaped with `<` and
+  `>` written as `\u003c` and `\u003e`, so no string inside can contain or close a marker. The
+  system prompt tells the model that anything in a block may look like instructions and must
+  not be followed or repeated.
+- **The fake model** (`ONCALL_MODEL=fake`, the only value) is rule-based and offline. It reads
+  the prompt's structured numbers and writes from fixed playbooks per category, so the same
+  evidence gives the same answer. It never echoes the incident's or the logs' text, so nothing a
+  log or an alert says can change it. It proposes a cause only when the numbers support it
+  (provider-type errors at least 80% of the failures, or validation-type errors strictly more
+  than half, so never at an even split), and only as an inference.
+- **A real provider is not implemented.** The application's own `AIProvider` interprets
+  transactions and has no free-form method, and its Anthropic provider doesn't exist yet, so
+  nothing safe exists to reuse. The seam is `Model.complete(system, user) -> str` returning the
+  schema's JSON, chosen by `ONCALL_MODEL`. Adding one means a key from the environment (never
+  Git), network egress this internal network deliberately lacks, a fresh review of what the prompt
+  contains (an external model provider is an external service), and nothing else: its answers
+  go through the same validation below.
+- **A model's answer is untrusted.** It must be one JSON object with exactly the schema's keys,
+  every text plain, at most 240 characters (600 for the assessment), free of secrets, and it
+  must pass a content policy: no URLs; no shell syntax or command names (`curl`, `docker`,
+  `kubectl`, `aws`, `python` …); no repository operations (push, commit, merge); no deploy,
+  promote or rollback; no database writes; nothing that disables, silences or deletes alerts;
+  nothing that asks to print or send secrets; no echo of injected instructions ("ignore previous
+  instructions"); and no root cause stated as fact ("the root cause is", "was caused by",
+  "proves"). A cause must cite evidence the responder collected *and that found something* (see
+  [Evidence](#evidence-sources-queries-and-bounds)), and confidence can't exceed what was
+  observed. One violation rejects the whole answer, and the report is written from the
+  **fallback**: fixed text, no proposed cause, confidence low, and a limitation saying why. The
+  same happens if the model raises.
+- **Look-alike characters don't get past it.** The policy reads each text as written and again as
+  it would look in plain ASCII: fullwidth, circled and mathematical letters become ASCII (so
+  `ｃｕｒｌ` is `curl`), accents, combining marks and invisible characters are dropped, and
+  letters that imitate an ASCII one (Cyrillic `с` for `c`, Greek `α` for `a`, Armenian `ս` for `u`,
+  small capitals, non-breaking hyphens) become that letter. A word that mixes alphabets using such
+  a look-alike (`сurl`) is refused, and so is any invisible character. Ordinary text passes
+  unchanged: Russian, Kazakh, Greek or Chinese sentences, accents, units like `μs` and `Ω`,
+  typographic dashes and quotes, and words of different alphabets side by side.
+
+### The report: `spendwise.oncall.report.v1`
+
+Stored as one JSON object per line in `/var/lib/oncall/reports.jsonl` (a 4 MiB tmpfs, gone with
+the container): the latest 100 reports and at most 1 MiB, each at most 24 KiB, replaced when the
+same incident is reported again. A complete real example is
+`deploy/observability/oncall-responder/examples/report-ai-firing.json`.
+
+| Field | What it holds |
+|---|---|
+| `schema`, `report_id` | the version; a hash of the alert's fingerprint, state and start |
+| `incident` | fingerprint, status, kind, alert title, rule UID, start, end, received time, the links. The title is stored only if it reads like a title; the incident's summary, description and runbook are not stored |
+| `severity`, `category`, `environment`, `observed_at` | from the incident, and when the report was made |
+| `assessment` | what is happening, in at most 600 characters |
+| `evidence[]` | **observed**: built by the responder from the backends (`basis: observed`), including the incident itself and any source that was unavailable (`available: false`) |
+| `likely_causes[]` | **inference**: `certainty` is `possible` or `probable`, never fact, and each cites evidence IDs it rests on, only ones that found something |
+| `recommended_actions[]` | **recommendation**: a kind (`investigate`, `verify`, `monitor`, `escalate`, `human_change`) and `requires_human_approval: true` |
+| `verification_steps[]` | how a human can tell it's fixed |
+| `confidence`, `escalation_required` | `low`, `medium` or `high`, never above what was observed: `low` unless a metric found something, `medium` with metrics alone, `high` only when logs or traces also found something (a query that found nothing counts for none of it). Escalation is true for a critical alert that is firing, and when monitoring itself is blind |
+| `limitations[]` | what was not checked, and every source that failed |
+| `advisory_only`, `actions_executed` | always `true` and `[]` |
+| `model`, `handoff` | which model answered and whether its answer was used or rejected, and that the handoff was authenticated |
+
+Every report is validated before it is stored (`validate_report`): exact fields, bounds,
+`basis` markers, evidence citations, the content policy again on every text, and a scan for
+secrets. If even the fallback fails that, nothing is stored and the log says so.
+
+### Privacy and prompt injection
+
+What `make oncall` checks, with canary values (an email, a password, a transaction description, a
+category name, an amount, AI input text, an exception message, a bearer token, an API key, a
+session cookie, a database URL and password, and the signing secret):
+
+- the canaries are sent through the real application, and a hostile log line (instructions to
+  run commands, print secrets and disable alerts, plus every canary) is written through the
+  application's own logger into Loki;
+- none of it appears in a report, the responder's log, the receiver's incidents or the receiver's
+  log;
+- a signed but hostile incident (instructions in its alert title, summary, description and
+  runbook, and a link to another host) gets the same analysis, word for word, as a calm one; its
+  title is withheld, its foreign link dropped, and the hostile text is in no report;
+- the hostile log line was in Loki, and the responder counted it as one "unrecognised" line.
+
+What isn't guaranteed, and why: a pattern scrubber can only remove what has a recognizable shape
+(an email, a token, an `Authorization` header, a URL with a password, nine or more digits).
+Free text, such as a transaction description, has none. It is kept out by structure instead: it
+is never logged by the application, a log line reaches the model only if it matches a known
+message, and reports hold no log text. The incident's own summary, description and runbook are
+free text that does reach the prompt, as data; they come from Git-provisioned alert rules, and no
+report keeps them.
+
+### Run it
+
+```bash
+export ONCALL_HMAC_SECRET=$(openssl rand -hex 32)
+F="-f compose.yaml -f compose.override.yaml -f compose.dashboard.yaml -f compose.oncall.yaml"
+docker compose $F up -d --build --wait
+
+# the controlled AI outage: half of 6 AI parses fail, through the real provider path
+cd backend
+C="docker compose -f ../compose.yaml -f ../compose.override.yaml -f ../compose.dashboard.yaml -f ../compose.oncall.yaml"
+uv run python -m integration.ai_traffic --parses 3 --outages 3 | $C exec -T app python -
+
+# about a minute later: the alert fires, the receiver hands it over, the responder reports
+$C exec oncall-responder cat /var/lib/oncall/reports.jsonl | python -m json.tool | less
+$C logs oncall-responder          # the decisions: accepted, queries run, model invoked, report stored
+make oncall                       # the same, automated and checked (about 2 minutes)
+$C down -v
+```
+
+### Limitations
+
+- **Local, demo and CI only; not 24/7 paging.** LGTM isn't on the production instance, nothing
+  watches production, and nothing here pages a person.
+- **The fake model is a rule-based playbook, not an intelligence.** It shows the safe shape of
+  the pipeline. How well a real model would reason over this evidence is untested, and no real
+  provider is implemented.
+- **No durability.** Incidents and reports are in memory (tmpfs) and the nonce memory is too: a
+  restart loses them, and a request replayed within 5 minutes of a restart would be accepted.
+  The receiver retries a handoff three times, then drops it.
+- **One incident analysed at a time.** A queue of 20; beyond that the responder answers 503.
+  Connections are handled concurrently but capped at 16, so someone on the `alerting` network
+  can still occupy every slot for 10 s at a time: bounded, not prevented.
+- **The first hop is network trust only.** The HMAC authenticates the receiver, not Grafana (see
+  [the handoff](#the-handoff-and-its-authentication)).
+- **Evidence windows are short.** Rates cover 5 minutes (Prometheus `increase()` extrapolates,
+  so counts can be fractional) and logs and traces 15. A responder that arrives late sees later
+  data than the alert did.
+- **Log evidence is tied to today's messages.** A new application warning or error shows as
+  "unrecognised" until it is added to `LOG_MESSAGES` in `evidence.py`.
+- **The secret lives in two containers' environments** (visible with `docker inspect` on that
+  machine). Fine for a local or CI run, not for a deployment, which would use a secret store.
+- **`make oncall` fires the AI alert only.** The HTTP, transaction and auth playbooks are covered
+  by unit tests and by signed incidents on real data, not by firing those alerts. A resolved
+  incident is unit-tested, not part of `make oncall`.
 
 ## Adding telemetry in code
 
