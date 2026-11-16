@@ -1,11 +1,13 @@
+import { useQueryClient } from '@tanstack/react-query'
 import { useRef, useState, type FormEvent } from 'react'
 
 import { ApiError, type Transaction, type TransactionType } from '../api/client'
-import { useCategories, useSaveTransaction } from '../api/queries'
+import { queryKeys, useCategories, useSaveTransaction } from '../api/queries'
 import { todayIso } from '../lib/dates'
 import { parseKztToTiyn, tiynToInput } from '../lib/money'
 import { describedBy, inputClass } from '../lib/styles'
 import { CategoryIcon } from './CategoryIcon'
+import { DialogErrorFallback, ErrorBoundary } from './ErrorBoundary'
 import { ArrowDownLeftIcon, ArrowUpRightIcon } from './icons'
 import { Modal } from './Modal'
 import { Button, Field, FormError, LoadingState } from './ui'
@@ -30,9 +32,18 @@ export function TransactionDialog({ open, transaction, defaultType = 'expense', 
   defaultType?: TransactionType
   onClose: () => void
 }) {
+  const client = useQueryClient()
   return (
     <Modal open={open} size="sheet" title={transaction ? 'Edit transaction' : 'New transaction'} onClose={onClose}>
-      <TransactionForm transaction={transaction} defaultType={defaultType} onDone={onClose} />
+      {/* The dialog lives in the Layout, outside the page's boundary: a form that throws must not
+          take the navigation down with it. */}
+      <ErrorBoundary
+        name="transaction dialog"
+        onRetry={() => client.resetQueries({ queryKey: queryKeys.categories() })}
+        fallback={(props) => <DialogErrorFallback {...props} onClose={onClose} />}
+      >
+        <TransactionForm transaction={transaction} defaultType={defaultType} onDone={onClose} />
+      </ErrorBoundary>
     </Modal>
   )
 }

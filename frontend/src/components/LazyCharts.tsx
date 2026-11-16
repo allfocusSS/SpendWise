@@ -1,13 +1,59 @@
-import { lazy, Suspense, type ReactNode } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { lazy, Suspense, type ComponentType, type ReactNode } from 'react'
 
 import type { CategoryBreakdown, MonthlyTrend } from '../api/client'
 import { SERIES } from '../lib/chartColors'
+import { retryableLoader } from '../lib/recovery'
+import { ChartErrorFallback, ErrorBoundary } from './ErrorBoundary'
 import { Skeleton } from './ui'
 
+/**
+ * A lazily loaded chart whose import can be tried again: React.lazy keeps a failed import's error
+ * for good, so `retry()` swaps in a new lazy component (only after a failure).
+ */
+function retryableLazy<P extends object>(load: () => Promise<ComponentType<P>>) {
+  const loader = retryableLoader(load)
+  const create = () => lazy(async () => ({ default: await loader.load() }))
+  let Loaded = create()
+  return {
+    Chart: (props: P) => <Loaded {...props} />,
+    retry: () => {
+      if (loader.retry()) Loaded = create()
+    },
+  }
+}
+
 // Recharts is the largest dependency, so it is loaded only when a chart is on screen.
-const CashFlowChart = lazy(() => import('./MonthlyTrendChart').then((m) => ({ default: m.CashFlowChart })))
-const NetBarsChart = lazy(() => import('./MonthlyTrendChart').then((m) => ({ default: m.NetBarsChart })))
-const CategoryTreemap = lazy(() => import('./CategoryTreemap').then((m) => ({ default: m.CategoryTreemap })))
+const cashFlow = retryableLazy(() => import('./MonthlyTrendChart').then((m) => m.CashFlowChart))
+const netBars = retryableLazy(() => import('./MonthlyTrendChart').then((m) => m.NetBarsChart))
+const treemap = retryableLazy(() => import('./CategoryTreemap').then((m) => m.CategoryTreemap))
+
+/**
+ * One chart's boundary: a chart that fails to load or throws shows a fallback at its own height,
+ * and the rest of the card and the page keep working. "Try again" loads the chart again with
+ * fresh figures, since a chart that threw may have been given bad data.
+ */
+function ChartBoundary({ chart, height, loading = <ChartSkeleton height={height} />, children }: {
+  chart: { retry: () => void }
+  height: string
+  /** Shown while the chart's code loads (unchanged from before the boundary). */
+  loading?: ReactNode
+  children: ReactNode
+}) {
+  const client = useQueryClient()
+  return (
+    <ErrorBoundary
+      name="chart"
+      onRetry={() => {
+        chart.retry()
+        return client.resetQueries({ queryKey: ['analytics'] })
+      }}
+      fallback={(props) => <ChartErrorFallback {...props} height={height} />}
+    >
+      <Suspense fallback={loading}>{children}</Suspense>
+    </ErrorBoundary>
+  )
+}
 
 const trendIsEmpty = (trend: MonthlyTrend) =>
   trend.months.every((m) => m.income_cents === 0 && m.expense_cents === 0)
@@ -80,9 +126,9 @@ export function LazyCashFlowChart({ trend, height = 'h-72', showNet = true, empt
     )
   }
   return (
-    <Suspense fallback={<ChartSkeleton height={height} />}>
-      <CashFlowChart trend={trend} height={height} showNet={showNet} />
-    </Suspense>
+    <ChartBoundary chart={cashFlow} height={height}>
+      <cashFlow.Chart trend={trend} height={height} showNet={showNet} />
+    </ChartBoundary>
   )
 }
 
@@ -91,17 +137,17 @@ export function LazyNetBarsChart({ trend, height = 'h-52' }: { trend: MonthlyTre
     return <ChartEmpty title="No monthly net yet" description="Each month's income minus expenses (from the server) appears here." />
   }
   return (
-    <Suspense fallback={<ChartSkeleton height={height} />}>
-      <NetBarsChart trend={trend} height={height} />
-    </Suspense>
+    <ChartBoundary chart={netBars} height={height}>
+      <netBars.Chart trend={trend} height={height} />
+    </ChartBoundary>
   )
 }
 
 
 export function LazyCategoryTreemap({ breakdown, height = 'h-56' }: { breakdown: CategoryBreakdown; height?: string }) {
   return (
-    <Suspense fallback={<Skeleton className={`w-full rounded-[var(--radius-control)] ${height}`} />}>
-      <CategoryTreemap breakdown={breakdown} height={height} />
-    </Suspense>
+    <ChartBoundary chart={treemap} height={height} loading={<Skeleton className={`w-full rounded-[var(--radius-control)] ${height}`} />}>
+      <treemap.Chart breakdown={breakdown} height={height} />
+    </ChartBoundary>
   )
 }

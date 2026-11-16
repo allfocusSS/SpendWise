@@ -1,9 +1,12 @@
+import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useState } from 'react'
-import { NavLink, Outlet } from 'react-router'
+import { NavLink, Outlet, useLocation } from 'react-router'
 
 import type { Transaction, TransactionType } from '../api/client'
 import { useCurrentUser, useLogout } from '../api/queries'
+import { CURRENT_USER_KEY } from '../lib/auth'
 import { TransactionDialogContext, type OpenTransactionDialog } from '../lib/transactionDialog'
+import { ErrorBoundary, PageErrorFallback } from './ErrorBoundary'
 import { AnalyticsIcon, DashboardIcon, PlusIcon, TagIcon, TransactionsIcon } from './icons'
 import { TransactionDialog } from './TransactionDialog'
 import { Button } from './ui'
@@ -115,6 +118,8 @@ function BottomTabs() {
 }
 
 export function Layout() {
+  const location = useLocation()
+  const client = useQueryClient()
   const [dialog, setDialog] = useState<{ open: boolean; transaction: Transaction | null; type: TransactionType }>({
     open: false,
     transaction: null,
@@ -153,7 +158,16 @@ export function Layout() {
         </header>
 
         <main id="main" className="mx-auto w-full max-w-[1440px] px-4 pt-6 pb-8 sm:px-6 lg:px-8 lg:pt-8 lg:pb-10">
-          <Outlet />
+          {/* A page that throws is replaced by a fallback; the header and navigation keep working.
+              Each page gets a fresh boundary, and "Try again" refetches its data (not the session). */}
+          <ErrorBoundary
+            key={location.pathname}
+            name="page"
+            onRetry={() => client.resetQueries({ predicate: (query) => query.queryKey[0] !== CURRENT_USER_KEY[0] })}
+            fallback={(props) => <PageErrorFallback {...props} />}
+          >
+            <Outlet />
+          </ErrorBoundary>
         </main>
 
         <footer className="mx-auto max-w-[1440px] px-4 pb-24 text-center text-xs text-ink-subtle lg:px-8 lg:pb-8 lg:text-left">
