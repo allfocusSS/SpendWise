@@ -357,6 +357,19 @@ docker compose -f compose.yaml -f compose.override.yaml -f compose.dashboard.yam
     from the app's Docker network.
   - There is no eBPF instrumentation (`ENABLE_OBI=false`), no privileged mode and no host
     networking.
+- **Only the image's plugins** (`GF_PLUGINS_PREINSTALL_DISABLED=true`). Otherwise Grafana
+  spends several minutes after every start downloading from grafana.com, one at a time: the
+  Drilldown apps (Metrics, Logs, Traces, Profiles), Grafana Advisor and the LLM app, plus newer
+  versions of the data source plugins the image bundles. While it swaps one of those in, queries
+  through that data source answer 404 "Unable to find datasource plugin" for about 100 ms (the
+  likely cause of an intermittent CI failure).
+  - The stack now runs exactly what the pinned image contains, the same every time, with nothing
+    downloaded. Explore, alerting, the dashboard's panels and the Prometheus, Loki and Tempo data
+    sources are all in the image.
+  - What that leaves out: the four Drilldown apps, Advisor and the LLM app. Nothing here uses
+    them.
+  - The tests also retry that one 404 for up to 15 s (`backend/integration/lgtm.py`), so a
+    Grafana that swaps plugins anyway doesn't fail them.
 - **AI parsing data:** no HTTP route calls AI parsing yet, so the demo traffic doesn't touch it.
   To see the AI panels move, run the real provider path in the app container, as the checks do:
   see [Watching an alert fire](#watching-an-alert-fire-demo) (`backend/integration/ai_traffic.py`).
@@ -984,7 +997,7 @@ The receiver signs every incident it hands over, and the responder checks:
   responder can tell that an incident came from the receiver, and that nobody changed it on the
   way. It can't tell that Grafana sent the alert behind it: the receiver's `/alerts` endpoint
   takes any POST from the `alerting` network and signs whatever it normalizes. Grafana, LGTM's
-  other components (the image downloads plugins at start-up) and the responder are on that
+  other components (with the plugins its image ships) and the responder are on that
   network, so anything running in LGTM could cause a forged but valid-looking incident. The
   result would be an advisory report and a few bounded read-only queries: no code runs and
   nothing changes. Closing that gap takes a credential between Grafana and the receiver, which

@@ -3,9 +3,11 @@
 - `serve()` is their session `stack` fixture: the real Compose stack plus LGTM and the alert
   receiver, with the same isolation as the integration tests (integration/stack.py): its own
   project, ports and image tag, a scrubbed environment, and everything removed afterwards.
-- `wait_until_ready()` waits for Grafana and its provisioned data sources (see there).
+- `wait_until_ready()` waits for Grafana, its provisioned data sources and the data source proxy
+  routes the tests use (see there).
 - `Backends` reaches Prometheus, Loki and Tempo through Grafana's data source proxy: Grafana is
-  the only port the stack publishes.
+  the only port the stack publishes. It rides out Grafana's brief "plugin not found" answers (see
+  `PROXY_UNAVAILABLE`).
 - `wait_for()` polls a check until it passes or a deadline expires: no fixed sleeps.
 
 Settings, for a suite whose prefix is e.g. SPENDWISE_DASHBOARD (all optional): `<prefix>_PROJECT`,
@@ -89,6 +91,33 @@ DATA_SOURCES = {"prometheus": "prometheus", "loki": "loki", "tempo": "tempo"}
 # is a real error (a wrong UID or type, a permission, a URL) and fails at once.
 STARTING = {404, 502, 503}
 
+# The routes through Grafana's data source proxy that the tests use, one per data source. Both the
+# readiness check and `Backends` build their requests from these, so they can't drift apart.
+PROMETHEUS = "/api/datasources/proxy/uid/prometheus/api/v1/"
+LOKI = "/api/datasources/proxy/uid/loki/loki/api/v1/"
+TEMPO = "/api/datasources/proxy/uid/tempo/api/"
+# The cheapest read-only request on each route that a healthy backend answers with 200.
+PROXY_CHECKS = {
+    "prometheus": (PROMETHEUS + "query", {"query": "vector(1)"}),
+    "loki": (LOKI + "labels", {}),
+    "tempo": (TEMPO + "echo", {}),
+}
+
+# Grafana's own 404s on the proxy route (a JSON {"message": ...}, unlike the backend's), seen in
+# CI and reproduced against the pinned LGTM image. The data source record exists and
+# /api/datasources/uid/<uid> answers 200, yet for about 100 ms the proxy answers 404 "Unable to
+# find datasource plugin". Cause: after startup Grafana's background plugin installer replaces its
+# bundled plugins (Prometheus, Loki and Tempo among them) with newer versions from grafana.com, one
+# at a time, over the next several minutes, and a plugin is unregistered between the swap and
+# its re-registration. The log reads "Installed plugin update pluginId=tempo", the proxy 404s,
+# then "Plugin registered pluginId=tempo". compose.dashboard.yaml turns that installer off
+# (GF_PLUGINS_PREINSTALL_DISABLED). A one-off check at startup couldn't catch it anyway, so
+# `Backends` also retries exactly these answers, for a bounded time, in case a Grafana swaps
+# plugins regardless. Any other answer, 404s from Prometheus, Loki or Tempo included, is the
+# real one.
+PROXY_UNAVAILABLE = {"Unable to find datasource plugin", "Data source not found"}
+PROXY_RETRY = 15  # seconds a proxy request may keep getting one of them before it fails
+
 
 class NotReady(RuntimeError):
     """Grafana or one of its data sources isn't usable: what, where, and the last answer."""
@@ -102,22 +131,47 @@ def wait_until_ready(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Grafana's database, then each provisioned data source, all within one deadline.
+    """Grafana's database, then each provisioned data source and its proxy route, in one deadline.
 
     /api/health alone isn't enough: Grafana 13 starts its HTTP server and its provisioning as
     concurrent services, so it can answer "database ok" before the provisioned data sources
     exist, and the data source proxy then answers 404. LGTM's own health check (and so
     `docker compose up --wait`) only waits for /api/health.
+
+    Nor is the data source record enough, so each one is followed by a request on the proxy route
+    the tests use (`PROXY_CHECKS`): what is waited for is what is used. A proxy that keeps
+    answering 404 until the deadline is a failure, with Grafana's answer in the message.
     """
     end = clock() + deadline
-    checks = [("Grafana", "/api/health", healthy)] + [
-        (f"data source {uid!r}", f"/api/datasources/uid/{uid}", provisioned(uid, kind))
-        for uid, kind in data_sources.items()
+    checks: list[tuple[str, str, dict, Callable[[httpx.Response], str | None], str]] = [
+        ("Grafana", "/api/health", {}, healthy, "Is Grafana running, and is its database up?")
     ]
-    for what, path, accept in checks:
+    for uid, kind in data_sources.items():
+        checks.append(
+            (
+                f"data source {uid!r}",
+                f"/api/datasources/uid/{uid}",
+                {},
+                provisioned(uid, kind),
+                "Is it provisioned (LGTM's grafana-datasources.yaml), under this UID?",
+            )
+        )
+        if uid in PROXY_CHECKS:
+            path, params = PROXY_CHECKS[uid]
+            checks.append(
+                (
+                    f"data source {uid!r} proxy",
+                    path,
+                    params,
+                    lambda response: None,  # 200 is the answer
+                    "The data source exists, but Grafana can't serve queries through it: is its "
+                    "plugin loaded, and does its backend answer?",
+                )
+            )
+    for what, path, params, accept, hint in checks:
         while True:
             try:
-                response = grafana.get(path)
+                response = grafana.get(path, params=params)
             except httpx.TransportError as error:  # not listening yet
                 last = f"no answer ({type(error).__name__})"
             else:
@@ -136,8 +190,7 @@ def wait_until_ready(
                     )
             if clock() > end:
                 raise NotReady(
-                    f"{what} not ready after {deadline}s: GET {path} last answered {last}. "
-                    "Is it provisioned (LGTM's grafana-datasources.yaml), under this UID?"
+                    f"{what} not ready after {deadline}s: GET {path} last answered {last}. {hint}"
                 )
             sleep(interval)
 
@@ -146,6 +199,18 @@ def healthy(response: httpx.Response) -> str | None:
     """None once Grafana's database is up; otherwise why it is still starting."""
     database = response.json().get("database")
     return None if database == "ok" else f"200, database {database!r}"
+
+
+def grafana_message(response: httpx.Response) -> str | None:
+    """The `message` of Grafana's own 404, or None (another status, or not Grafana's JSON)."""
+    if response.status_code != 404:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    message = body.get("message") if isinstance(body, dict) else None
+    return message if isinstance(message, str) else None
 
 
 def provisioned(uid: str, kind: str) -> Callable[[httpx.Response], str | None]:
@@ -174,13 +239,40 @@ def wait_for(what: str, check: Callable[[], object], deadline: float = DEADLINE)
 class Backends:
     """Prometheus, Loki and Tempo, through Grafana's data source proxy."""
 
-    def __init__(self, grafana: httpx.Client) -> None:
+    def __init__(
+        self,
+        grafana: httpx.Client,
+        retry: float = PROXY_RETRY,
+        interval: float = 0.25,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.grafana = grafana
+        self.retry, self.interval, self.clock, self.sleep = retry, interval, clock, sleep
+
+    def get(self, path: str, params: dict) -> httpx.Response:
+        """GET through the proxy, riding out Grafana's brief `PROXY_UNAVAILABLE` answers.
+
+        Only those: any other answer is returned as it is, and one of them lasting longer than
+        `retry` seconds raises NotReady with Grafana's own words, so a data source that is really
+        missing still fails the test, after `retry` seconds, with a clear message and no bare 404.
+        """
+        end = self.clock() + self.retry
+        while True:
+            response = self.grafana.get(path, params=params)
+            message = grafana_message(response)
+            if message not in PROXY_UNAVAILABLE:
+                return response
+            if self.clock() > end:
+                raise NotReady(
+                    f"Grafana's data source proxy kept answering 404 {message!r} for "
+                    f"{self.retry}s: GET {path}. The data source record exists, but Grafana "
+                    "can't find its plugin: did Grafana restart, or the data source go away?"
+                )
+            self.sleep(self.interval)
 
     def prometheus(self, path: str, **params) -> dict:
-        response = self.grafana.get(
-            f"/api/datasources/proxy/uid/prometheus/api/v1/{path}", params=params
-        )
+        response = self.get(PROMETHEUS + path, params)
         response.raise_for_status()
         return response.json()
 
@@ -195,12 +287,12 @@ class Backends:
 
     def loki(self, query: str) -> list[dict]:
         now = time.time_ns()
-        response = self.grafana.get(
-            "/api/datasources/proxy/uid/loki/loki/api/v1/query_range",
-            params={"query": query, "start": now - 3600 * 10**9, "end": now, "limit": 100},
+        response = self.get(
+            LOKI + "query_range",
+            {"query": query, "start": now - 3600 * 10**9, "end": now, "limit": 100},
         )
         response.raise_for_status()
         return response.json()["data"]["result"]
 
     def tempo(self, path: str, **params) -> httpx.Response:
-        return self.grafana.get(f"/api/datasources/proxy/uid/tempo/api/{path}", params=params)
+        return self.get(TEMPO + path, params)
