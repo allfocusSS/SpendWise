@@ -10,9 +10,12 @@ refused sign-ins.
     (`make observability`);
   - Grafana's all-in-one LGTM image shows the
     [SpendWise dashboard](#dashboard-grafana-lgtm-local) over Prometheus, Loki and Tempo
-    (`make dashboard`).
-- **Off by default**, and **not yet enabled in development (Render) or production (AWS)**.
-- **Not done yet:** alerts and the AI on-call responder are the next steps.
+    (`make dashboard`);
+  - the same Grafana evaluates SpendWise's [alert rules](#alerts-grafana-local) and notifies a
+    local webhook receiver (`make alerts`).
+- **Off by default**, and **not yet enabled in development (Render) or production (AWS)**. The
+  alerting stack is local, demo and CI only: nothing pages anyone around the clock yet.
+- **Not done yet:** the [AI on-call responder](#next-the-ai-on-call-responder) is the next step.
 
 ```mermaid
 flowchart LR
@@ -39,6 +42,9 @@ flowchart LR
 | Collector configuration | `deploy/observability/otel-collector.yaml` |
 | Opt-in Compose overlay (Collector + telemetry on) | `compose.observability.yaml` |
 | End-to-end check | `backend/observability_smoke/` (`make observability`, CI job "Observability (OpenTelemetry)") |
+| Alert rules, contact point, notification policy | `deploy/observability/grafana/alerting/` |
+| Alert receiver (webhook → normalized incidents) | `deploy/observability/alert-receiver/` |
+| Alerting end-to-end check | `backend/alerts_smoke/` (`make alerts`, CI job "Observability Alerts") |
 
 ## Signals
 
@@ -148,8 +154,8 @@ reads, updates, deletes or malformed requests, and the bounded attributes.
 
 - **AI parsing has no HTTP endpoint yet.** No route calls the AI provider: that's Issue #2. The
   metrics are on the real provider call, so they count as soon as something calls it. Until
-  then, the dashboard checks and the demo drive that path in a one-off process inside the app
-  container (`backend/dashboard_smoke/test_dashboard.py`). There is no test-only code in the
+  then, the dashboard and alert checks and the demo drive that path in a one-off process inside
+  the app container (`backend/integration/ai_traffic.py`). There is no test-only code in the
   application.
 - **Error types are a closed list, never an exception name** (`metrics.ErrorType`):
 
@@ -346,8 +352,8 @@ docker compose -f compose.yaml -f compose.override.yaml -f compose.dashboard.yam
   - There is no eBPF instrumentation (`ENABLE_OBI=false`), no privileged mode and no host
     networking.
 - **AI parsing data:** no HTTP route calls AI parsing yet, so the demo traffic doesn't touch it.
-  To see the AI panels move, run the real provider path in the app container, as the checks do.
-  The `python -c` program `AI_TRAFFIC` in `backend/dashboard_smoke/test_dashboard.py` shows how.
+  To see the AI panels move, run the real provider path in the app container, as the checks do:
+  see [Watching an alert fire](#watching-an-alert-fire-demo) (`backend/integration/ai_traffic.py`).
 - **Dashboard as code:** `deploy/observability/grafana/dashboards/spendwise-overview.json` is the
   dashboard, and `deploy/observability/grafana/dashboards.yaml` provisions it.
   - Both are mounted read-only at the path the image documents for custom dashboards.
@@ -468,11 +474,49 @@ afterwards. It:
 - confirms no canary appears in any label name, label value, metric metadata or the dashboard,
   and that only Grafana is published, on 127.0.0.1.
 
-In CI the job **Observability (OpenTelemetry)** runs `make observability` for every pull request
-and every push to `main`, and the job **Observability Dashboard** runs `make dashboard`. "All
-checks passed" requires both, and so, through that check, does the promotion workflow. Neither
-job has an OIDC token or deploys anything. The job has the workflow's read-only token only. On failure it uploads the
-run's container logs, Collector output included.
+`make alerts` (`backend/alerts_smoke/`) uses the same stack (project `spendwise-alerts`, the app
+on port 18400, Grafana on 127.0.0.1:13100, all removed afterwards; about 5 minutes). Every wait
+is a poll against a deadline, never a fixed sleep. It:
+
+- **provisioning:** reads the provisioned rules, contact point and policy through Grafana's
+  read-only APIs and compares them with the files in Git;
+- **quiet traffic:** sends traffic with canary personal data (two saves, two of the user's
+  validation mistakes, three refused sign-ins). It runs every rule's PromQL on the real
+  Prometheus and requires:
+  - one series per environment, labelled with the environment only;
+  - finite values under each threshold (5xx rate 0, failed-save rate 0 despite the mistakes,
+    AI "no data");
+  - every rule Normal, and no notification;
+- **the receiver:** checks it refuses anything but a Grafana notification (posted from LGTM, the
+  only container that can reach it), and that it is unpublished, internal and locked down;
+- **firing:** sends AI parse failures over 10% through the real provider path (3 of 6). It
+  requires:
+  - the counters and the rule's expression in Prometheus first;
+  - then the rule going `inactive → pending → firing`, and Grafana's state history saying
+    Normal → Pending → Alerting with the value;
+  - then the alert routed to `spendwise-oncall-webhook`, and exactly one firing incident at the
+    receiver, with every envelope field checked;
+- **resolved:** sends 60 healthy parses. It requires the rate under 10%, the rule Normal
+  (history: Alerting → Normal) and exactly one resolved incident with the same fingerprint;
+- **privacy:** confirms no canary appears in any rule, alert, history record, incident or
+  receiver log;
+- **last, a failing query:** stops Prometheus inside LGTM and requires every rule's health to
+  be `error`, and `datasource_error` incidents with the rule's severity and category to reach
+  the receiver.
+
+In CI:
+
+- **Jobs:**
+  - **Observability (OpenTelemetry)** runs `make observability`;
+  - **Observability Dashboard** runs `make dashboard`;
+  - **Observability Alerts** runs `make alerts`.
+- **When:** every pull request and every push to `main`, in parallel.
+- **Required:** "All checks passed" requires all three, and so, through that check, does the
+  promotion workflow.
+- **Limits:** none of them has an OIDC token or deploys anything; each has the workflow's
+  read-only token only.
+- **On failure:** each uploads the run's container logs (Collector, LGTM and receiver output
+  included).
 
 ## Turning it on in development or production (not done here)
 
@@ -491,21 +535,335 @@ When it's time:
   OTLP to a hosted Collector, or to the backend's OTLP gateway, with
   `OTEL_EXPORTER_OTLP_HEADERS` from a Render secret. Either way, set `OTEL_TRACES_SAMPLE_RATIO`.
 
-## Next: alerts
+## Alerts (Grafana, local)
 
-Alerts are the next step, and none exists yet. The dashboard's queries are written so alert
-rules can reuse them as they are, with the variables replaced by fixed values. Good first
-candidates:
+Grafana in the local LGTM stack (`compose.dashboard.yaml`) evaluates five SpendWise alert rules
+and sends its notifications to a small local webhook receiver. Like the dashboard, this is for
+**development, demos and CI**. LGTM doesn't run on the AWS t3.micro or on Render, so these
+alerts don't watch development or production around the clock, and nothing pages anyone yet.
 
-| Alert | Expression (5-minute window) | Suggested threshold |
+```mermaid
+flowchart LR
+    app["SpendWise API<br/>(application metrics)"] -- "OTLP/HTTP" --> prom["Prometheus<br/>(LGTM)"]
+    prom --> rules["Grafana alert rules<br/>evaluated every 10 s"]
+    rules -- "Normal → Pending → Alerting" --> am["Grafana Alertmanager<br/>notification policy"]
+    am -- "webhook POST /alerts<br/>(internal 'alerting' network)" --> recv["alert-receiver<br/>normalized incidents"]
+    recv -. "next milestone" .-> ai["AI on-call responder"]
+```
+
+**All of it is in Git.** `deploy/observability/grafana/alerting/` holds `rules.yaml`,
+`contact-points.yaml` and `policies.yaml`.
+
+- **Mounted read-only** at the image's alerting provisioning path. Grafana marks everything in
+  them as provisioned (`provenance: file`), so neither the UI nor the API can change them.
+- **To change a rule:** edit the YAML, then restart LGTM (`docker compose … restart lgtm`).
+  Grafana reads alerting files at startup.
+- **No `$` in values.** Grafana expands `$NAME` as an environment variable in provisioning files,
+  so templates use `.Labels` and `.Values` instead.
+
+### The rules
+
+The rules reuse the dashboard's real series and PromQL. The dashboard's `$environment` and
+`$version` variables become a grouping by `deployment_environment_name`, so each rule yields one
+alert per environment, and that label comes from the metrics themselves.
+
+| Rule (UID) | Severity, category | Fires when (5-minute window) | For |
+|---|---|---|---|
+| SpendWise HTTP 5xx Rate High (`spendwise-http-5xx-rate`) | critical, http | 5xx answers / all requests > 5 % | 1m |
+| SpendWise HTTP P95 Latency High (`spendwise-http-p95-latency`) | warning, http | p95 request duration > 1 s | 1m |
+| SpendWise Transaction Save Failure Rate High (`spendwise-transaction-save-failures`) | critical, transaction | saves failed for a database or internal error / all save attempts > 1 % | 1m |
+| SpendWise AI Parse Failure Rate High (`spendwise-ai-parse-failures`) | warning, ai | failed AI parses / AI parse requests > 10 % | 30s |
+| SpendWise Sign-in Failures High (`spendwise-sign-in-failures`) | warning, auth | refused sign-ins > 20 per minute (5-minute average) | 1m |
+
+Each query is the A query, and a threshold expression on A (C) is the condition. The exact
+PromQL:
+
+```promql
+# HTTP 5xx rate. With traffic but no 5xx it is 0, not "no data".
+(
+  sum by (deployment_environment_name) (rate(http_server_request_duration_seconds_count{service_name="spendwise-api", http_response_status_code=~"5.."}[5m]))
+  or
+  0 * sum by (deployment_environment_name) (rate(http_server_request_duration_seconds_count{service_name="spendwise-api"}[5m]))
+)
+/
+(sum by (deployment_environment_name) (rate(http_server_request_duration_seconds_count{service_name="spendwise-api"}[5m])) > 0)
+
+# HTTP p95 latency. Only where there was traffic: never NaN.
+histogram_quantile(0.95, sum by (deployment_environment_name, le) (rate(http_server_request_duration_seconds_bucket{service_name="spendwise-api"}[5m])))
+and on (deployment_environment_name)
+(sum by (deployment_environment_name) (rate(http_server_request_duration_seconds_count{service_name="spendwise-api"}[5m])) > 0)
+
+# Transaction saves failing for a system reason
+sum by (deployment_environment_name) (increase(spendwise_transaction_create_error_total{service_name="spendwise-api", error_type=~"database|internal"}[5m]))
+/
+((
+  sum by (deployment_environment_name) (increase(spendwise_transaction_created_total{service_name="spendwise-api"}[5m]))
+  +
+  sum by (deployment_environment_name) (increase(spendwise_transaction_create_error_total{service_name="spendwise-api"}[5m]))
+) > 0)
+
+# AI parse failures
+sum by (deployment_environment_name) (increase(spendwise_ai_parse_error_total{service_name="spendwise-api"}[5m]))
+/
+(sum by (deployment_environment_name) (increase(spendwise_ai_parse_request_total{service_name="spendwise-api"}[5m])) > 0)
+
+# Refused sign-ins per minute
+sum by (deployment_environment_name) (rate(spendwise_auth_sign_in_failure_total{service_name="spendwise-api"}[5m])) * 60
+```
+
+- **User mistakes never page.** Refused input (`error_type="validation"`) counts as a save
+  attempt in the denominator, but never as a failure. Telling a user that the category doesn't
+  exist is the app working.
+- **AI parsing:** every error type counts. Provider errors mean the provider is down; validation
+  errors mean answers that couldn't be used. No HTTP route calls AI parsing yet (Issue #2), so
+  this rule moves only when the provider path runs, as it does in `make alerts`.
+- **Refused sign-ins:** the threshold is an average over 5 minutes (more than 100 in 5 minutes),
+  not a burst of 20 within one minute. A 1-minute window would often hold a single point with
+  the default 60-second metric export.
+
+**Three different times:**
+
+| Setting | Value | What it means |
 |---|---|---|
-| HTTP error rate | `100 * (sum(rate(http_server_request_duration_seconds_count{service_name="spendwise-api", http_response_status_code=~"5.."}[5m])) or vector(0)) / (sum(rate(http_server_request_duration_seconds_count{service_name="spendwise-api"}[5m])) > 0)` | > 5 % for 5 minutes |
-| p95 latency | `histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name="spendwise-api"}[5m])))` | > 1 s for 10 minutes |
-| Transaction save failures | `100 * (sum(rate(spendwise_transaction_create_error_total{service_name="spendwise-api", error_type!="validation"}[5m])) or vector(0)) / ((sum(rate(spendwise_transaction_created_total{service_name="spendwise-api"}[5m])) or vector(0)) + (sum(rate(spendwise_transaction_create_error_total{service_name="spendwise-api"}[5m])) or vector(0)) > 0)` | > 1 % (database and internal errors only: rejected input is the user's doing) |
-| AI parse failures | `100 * (sum(rate(spendwise_ai_parse_error_total{service_name="spendwise-api"}[5m])) or vector(0)) / (sum(rate(spendwise_ai_parse_request_total{service_name="spendwise-api"}[5m])) > 0)` | > 10 % for 10 minutes |
-| Refused sign-ins | `sum(rate(spendwise_auth_sign_in_failure_total{service_name="spendwise-api"}[5m])) * 60` | > 20 per minute (password guessing) |
+| Window | `[5m]` in the PromQL | how much history one evaluation looks at |
+| Evaluation interval | `10s` (the rule group) | how often Grafana evaluates every rule |
+| Pending period (`for`) | `30s` (AI), `1m` (the others) | how long the condition must hold, evaluation after evaluation, before the alert fires. Until then it is Pending; one bad evaluation never notifies anyone |
 
-Each would also select `deployment_environment_name="production"`.
+After that, the notification policy waits `group_wait` (30 s) before the first notification. On
+this stack, AI failures notify about a minute after they happen (62 to 65 s measured).
+
+### No data, and queries that fail
+
+- **No data means OK** (`noDataState: OK`). Without traffic a ratio has no denominator, and the
+  guarded `> 0` leaves nothing, so a quiet environment is Normal ("Normal (NoData)" in
+  Grafana), not an outage. With traffic, the HTTP and transaction ratios are real numbers (0 when
+  all is well), not "no data".
+- **A query that fails fires an alert** (`execErrState: Error`). If Prometheus is down or a
+  query is broken, Grafana fires its own `DatasourceError` alert. That alert carries the rule's
+  labels (no environment: there was no result) and goes through the same policy to the same
+  webhook, so a broken data source never looks healthy. The rules' summaries then read, for
+  example, "AI parse failure rate unknown: its query failed".
+- **What Grafana does to the condition alert:** when a rule's query starts failing, Grafana
+  resolves that rule's firing alert for the environment (the series is missing) before the
+  DatasourceError fires. A responder should read a "resolved" followed by a `datasource_error`
+  as "unknown", not "recovered".
+- **Grafana's `Error` annotation:** Grafana adds one to `DatasourceError` alerts, holding the
+  data source's error text (an internal URL, no user data). The receiver doesn't keep it.
+- **Not covered yet:** telemetry that stops arriving altogether (an app that exports nothing)
+  looks like no data, which is OK. A heartbeat rule (`absent(target_info{…})` per expected
+  environment) belongs with alerting that runs continuously.
+
+### Labels and annotations
+
+- **Labels:** the rules carry `service=spendwise-api`, `team=spendwise`, `severity` (`critical`
+  or `warning`) and `category` (`http`, `transaction`, `ai` or `auth`). Grafana adds `alertname`
+  and `grafana_folder`, and each alert gets `deployment_environment_name` from its query result.
+  There is nothing else: the queries group by environment only, so no user, path, transaction
+  or trace ID can become a label.
+- **Annotations:**
+  - `summary`: one line, for example "AI parse failures above 10% in local";
+  - `description`: what changed, the measured value, the threshold and the likely impact on
+    users;
+  - `runbook`: the first place to look (a dashboard panel, then Loki and Tempo);
+  - `__dashboardUid__` and `__panelId__`, which link the rule to its dashboard panel. Grafana
+    turns them into `dashboardURL` and `panelURL` in each notification.
+- **What the templates may use:** the environment label and the rule's own value (`.Values.A`),
+  and each template reads right whether or not there is a value. No request, user or exception
+  data, and no root cause guessed.
+- **Resolved notifications** keep the rule's wording ("above 10%") with the latest value (for
+  example 4.57%). That's Grafana's behaviour: `status: resolved` is what says it's over.
+- **Links:** they use the local Grafana (`GF_SERVER_ROOT_URL=http://127.0.0.1:3000/`), never a
+  production URL.
+
+### Contact point and notification policy
+
+- **Contact point `spendwise-oncall-webhook`:**
+  - a webhook `POST` to `http://alert-receiver:8080/alerts`, the receiver's Docker DNS name on
+    the internal `alerting` network;
+  - at most 20 alerts per notification, and resolved notifications on;
+  - no credentials, no Slack, email or SaaS, and nothing leaves the machine.
+- **Policy (replaces Grafana's default tree):**
+  - **root:** everything goes to `spendwise-oncall-webhook`, the stack's only contact point, so
+    nothing is silently dropped;
+  - **route `service = spendwise-api`:**
+    - `group_by: [alertname, deployment_environment_name]`, so each alert in each environment
+      is its own incident;
+    - `group_wait: 30s` (alerts that fire together go out together);
+    - `group_interval: 1m` (the earliest a group's next notification, such as resolved, goes
+      out);
+    - `repeat_interval: 4h` (a reminder while it keeps firing).
+  - **No spam:** a group whose content doesn't change sends nothing until the 4-hour reminder.
+
+### The alert receiver
+
+`deploy/observability/alert-receiver/alert_receiver.py`: one standard-library Python file, run
+read-only in the official `python:3.13.18-alpine3.24` image (pinned by digest). It is the
+`alert-receiver` service in `compose.dashboard.yaml`.
+
+**Network:**
+- only the internal `alerting` network, shared with LGTM and nothing else;
+- no published port and no route out. The app can't even resolve its name.
+
+**Requests:**
+- `POST /alerts` only: other methods get 405, other paths 404;
+- `application/json` only (415);
+- a `Content-Length` is required (411), at most 256 KiB (413, refused before the body is read);
+- a client that stops sending for 5 s is dropped.
+
+**Payload:**
+- the JSON is parsed as data and must be Grafana's webhook format, version 1 (400 if malformed,
+  422 if it isn't);
+- nothing in it is evaluated, rendered, fetched or executed.
+
+**What it keeps and logs:**
+- only the normalized incident below: no labels map, no raw payload;
+- the latest 200 incidents, one JSON object per line, in `/var/lib/alert-receiver/incidents.jsonl`.
+  That is a 1 MiB tmpfs, gone with the container;
+- one log line per request (method, path, status) and one per incident (status, rule,
+  environment). Never a payload or a header.
+
+**Container:**
+- runs as `nobody` (65534), with a read-only root filesystem and all capabilities dropped;
+- `no-new-privileges`, a 64 MiB memory limit and 32 processes at most;
+- no Docker socket, no credentials and no environment.
+
+**The webhook payload, as Grafana 13.3 really sends it** (captured from this stack). The
+complete payloads are `examples/grafana-firing.json` and `examples/grafana-resolved.json`:
+
+```json
+{
+  "version": "1", "status": "firing", "receiver": "spendwise-oncall-webhook",
+  "groupKey": "{}/{service=\"spendwise-api\"}:{alertname=\"SpendWise AI Parse Failure Rate High\", deployment_environment_name=\"local\"}",
+  "externalURL": "http://127.0.0.1:3000/", "truncatedAlerts": 0,
+  "alerts": [{
+    "status": "firing",
+    "labels": {"alertname": "SpendWise AI Parse Failure Rate High", "category": "ai",
+               "deployment_environment_name": "local", "grafana_folder": "SpendWise",
+               "service": "spendwise-api", "severity": "warning", "team": "spendwise"},
+    "annotations": {"summary": "AI parse failures above 10% in local", "description": "28.81% of …", "runbook": "Open …"},
+    "startsAt": "2026-11-15T16:20:30Z", "endsAt": "0001-01-01T00:00:00Z",
+    "values": {"A": 0.288, "C": 1}, "valueString": "[ var='A' … ]",
+    "ruleUID": "spendwise-ai-parse-failures", "fingerprint": "a7edbaa05b9b86b7",
+    "generatorURL": "http://127.0.0.1:3000/alerting/grafana/spendwise-ai-parse-failures/view?orgId=1",
+    "dashboardURL": "http://127.0.0.1:3000/d/spendwise-overview?…", "panelURL": "…&viewPanel=19",
+    "silenceURL": "…"
+  }],
+  "groupLabels": {…}, "commonLabels": {…}, "commonAnnotations": {…}, "title": "[FIRING:1] …", "message": "…"
+}
+```
+
+**The normalized incident** (`spendwise.incident.v1`) is the next milestone's input contract
+(`examples/incident-firing.json`). There is one incident per alert in a notification. Every field
+is bounded, and a missing or invalid field is `null`:
+
+| Field | From | Rule |
+|---|---|---|
+| `schema` | fixed | `spendwise.incident.v1` |
+| `status` | `alerts[].status` | `firing` or `resolved`, else the notification is rejected |
+| `alert` | `labels.rulename`, else `labels.alertname` | the rule's title, plain text, at most 120 characters |
+| `kind` | `labels.alertname` | `condition`, `datasource_error` (the query failed) or `no_data` |
+| `rule_uid` | `ruleUID` | `[A-Za-z0-9_-]{1,40}` |
+| `fingerprint` | `fingerprint` | 16 hex characters; the same for an alert's firing and resolved notifications |
+| `severity`, `category` | labels | `critical`/`warning`; `http`/`transaction`/`ai`/`auth` |
+| `service`, `team`, `environment` | labels (`deployment_environment_name`) | lowercase names, at most 63 characters |
+| `summary`, `description`, `runbook` | annotations | plain single-line text: markup, control and format characters removed; at most 200, 1000 and 1000 characters |
+| `value` | `values.A` | the rule's measured value (an aggregate), finite, else `null` |
+| `starts_at`, `ends_at` | `startsAt`, `endsAt` | UTC to the second; `ends_at` only once resolved |
+| `grafana_url`, `dashboard_url`, `panel_url` | `generatorURL`, `dashboardURL`, `panelURL` | kept only if they point at the Grafana that sent the notification (same origin as `externalURL`) |
+| `received_at` | the receiver's clock | UTC to the second |
+
+```json
+{
+  "schema": "spendwise.incident.v1", "status": "firing",
+  "alert": "SpendWise AI Parse Failure Rate High", "kind": "condition",
+  "rule_uid": "spendwise-ai-parse-failures", "fingerprint": "a7edbaa05b9b86b7",
+  "severity": "warning", "category": "ai", "service": "spendwise-api", "team": "spendwise",
+  "environment": "local",
+  "summary": "AI parse failures above 10% in local",
+  "description": "28.81% of AI transaction parsing requests in the local environment failed over the last 5 minutes (threshold 10%). Users asking for an AI draft are likely getting errors; entering a transaction by hand still works.",
+  "runbook": "Open the SpendWise dashboard's AI transaction parsing row: …",
+  "value": 0.288079, "starts_at": "2026-11-15T16:20:30Z", "ends_at": null,
+  "grafana_url": "http://127.0.0.1:3000/alerting/grafana/spendwise-ai-parse-failures/view?orgId=1",
+  "dashboard_url": "http://127.0.0.1:3000/d/spendwise-overview?…",
+  "panel_url": "http://127.0.0.1:3000/d/spendwise-overview?…&viewPanel=19",
+  "received_at": "2026-11-15T16:21:01Z"
+}
+```
+
+### Watching an alert fire (demo)
+
+Start the dashboard stack (see [Dashboard](#dashboard-grafana-lgtm-local)), then open:
+
+- **<http://127.0.0.1:3000/alerting/list>:** the SpendWise folder, group `spendwise-api`.
+  - A rule is **Normal** (or "Normal (NoData)" without traffic). It becomes **Pending** once its
+    condition holds, and **Firing** (state Alerting) once it has held for the pending period.
+  - **Error** means its query failed.
+  - A rule's **History** tab lists every state change with the measured value.
+- **Contact points:** <http://127.0.0.1:3000/alerting/notifications>.
+- **Notification policies:** <http://127.0.0.1:3000/alerting/routes>.
+
+No HTTP route calls AI parsing yet, so the controlled failure runs the real provider path in the
+app container. It's the same program `make alerts` uses (`backend/integration/ai_traffic.py`).
+The program's outages raise `AIUnavailableError` through the real metered provider, so the
+counters move exactly as they would for a real outage:
+
+```bash
+cd backend
+COMPOSE="docker compose -f ../compose.yaml -f ../compose.override.yaml -f ../compose.dashboard.yaml"
+# 3 of 6 parses fail: Pending within ~10 s, Firing 30 s later, the webhook ~30 s after that
+uv run python -m integration.ai_traffic --parses 3 --outages 3 | $COMPOSE exec -T app python -
+# Healthy parses bring the rate under 10 %: Normal, then the resolved notification
+uv run python -m integration.ai_traffic --parses 60 | $COMPOSE exec -T app python -
+# What the receiver got
+$COMPOSE exec alert-receiver cat /var/lib/alert-receiver/incidents.jsonl
+$COMPOSE logs alert-receiver
+```
+
+### Privacy
+
+- **Rules and labels:** the rules read aggregates by environment only, and their labels are
+  fixed.
+- **Annotations:** they template only the environment and the measured value. No exception text
+  reaches them; Grafana's own `Error` annotation on `DatasourceError` alerts is dropped by the
+  receiver.
+- **The receiver:**
+  - keeps the allowlisted, bounded fields only;
+  - keeps no labels map, no raw payload and no links to anywhere but Grafana;
+  - logs no payload.
+- **Canary check:** `make alerts` sends canary personal data through the whole chain: an email,
+  a password, a description, a category name, an amount, AI input text and an exception
+  message. It then checks that none of them, nor the session cookie or the database password,
+  appears in any of these:
+  - the rule definitions;
+  - the rule states and alerts;
+  - Grafana's Alertmanager;
+  - the state history;
+  - the incidents;
+  - the receiver's log.
+
+## Next: the AI on-call responder
+
+The next milestone makes an AI agent the on-call responder for these alerts. This one prepares
+for it and adds no AI:
+
+- **Input:** the responder reads normalized incidents (`spendwise.incident.v1`, above), never
+  Grafana's raw JSON. The receiver is where it plugs in: today it only records incidents.
+- **Untrusted text:** treat `summary`, `description` and `runbook` as data, not instructions.
+  They come from the rules' templates, but the receiver can't prove who wrote them; it only
+  strips markup and bounds their length.
+- **Telling incidents apart:**
+  - `fingerprint` identifies an alert: firing, then resolved, with the same fingerprint;
+  - `kind` separates a real condition from a query that failed (`datasource_error`);
+  - `rule_uid`, `environment`, `value` and the links lead to the evidence: the dashboard panel,
+    then Loki and Tempo for that environment and time.
+- **Before it acts on anything:**
+  - authenticate the sender (Grafana's webhook supports HMAC signatures, with the secret from
+    the runtime environment, never Git);
+  - keep the receiver unpublished;
+  - decide what, if anything, it may change without a human.
+- **Production:** LGTM is not on the t3.micro, so production alerting needs the same rules
+  (same PromQL) in a managed backend's alerting, with the same contact point contract. Only
+  then will alerts run around the clock.
 
 ## Adding telemetry in code
 

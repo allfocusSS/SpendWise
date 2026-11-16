@@ -1,0 +1,21 @@
+# Where SpendWise alerts go: a webhook to the local alert receiver (deploy/observability/
+# alert-receiver/), on the internal `alerting` Docker network only. Nothing leaves the machine:
+# no Slack, email or SaaS. The name is the one the AI on-call responder will take over next.
+
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: spendwise-oncall-webhook
+    receivers:
+      - uid: spendwise-oncall-webhook
+        type: webhook
+        # Firing and resolved notifications both go out.
+        disableResolveMessage: false
+        settings:
+          # Docker DNS name of the receiver: not published on the host, not on the internet.
+          url: http://alert-receiver:8080/alerts
+          httpMethod: POST
+          # At most this many alerts per notification (the rest are counted in truncatedAlerts),
+          # so a payload stays well under the receiver's size cap.
+          maxAlerts: 20

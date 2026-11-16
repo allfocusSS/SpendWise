@@ -7,28 +7,27 @@ against that data. Canary values (an email, a password, a description, an amount
 name, AI input text) are sent too, and must not appear in any metric label or dashboard value.
 
 No HTTP endpoint calls AI parsing yet (Issue #2), so the AI traffic runs the real provider
-factory and the real metered provider in a one-off process inside the app container: the same
-code, settings and OTLP export as the server, and nothing added to the application for it.
+factory and the real metered provider in a one-off process inside the app container
+(integration/ai_traffic.py): nothing is added to the application for it.
 """
 
 import json
 import re
 import secrets
-import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 import pytest
 
+from integration import ai_traffic
+from integration.lgtm import Backends, wait_for
 from integration.stack import Stack
 
 DASHBOARD = (
     Path(__file__).resolve().parents[2]
     / "deploy/observability/grafana/dashboards/spendwise-overview.json"
 )
-DEADLINE = 120
 SELECT = 'service_name="spendwise-api"'
 SIGN_IN_REFUSED = "Sign-in refused: unknown email or wrong password"
 
@@ -54,102 +53,10 @@ CANARY_AI_TEXT = f"{CANARY_MERCHANT} taxi 2500 yesterday"
 
 SAVED, REJECTED, REFUSED_SIGN_INS, AI_PARSES, AI_OUTAGES = 3, 1, 3, 5, 2
 
-# Runs inside the app container (its OTEL_* settings, its code): the real factory-built
-# provider, and the real metered wrapper around a provider that is down.
-AI_TRAFFIC = f"""
-import datetime
-from app.ai import AIUnavailableError, build_ai_provider
-from app.ai.metered import MeteredAIProvider
-from app.ai.schemas import CategoryOption, TransactionDraftRequest
-from app.core.config import get_settings
-from app.observability import metrics as app_metrics, setup_telemetry, shutdown_telemetry
-
-settings = get_settings()
-telemetry = setup_telemetry(settings)
-app_metrics.initialize(settings.ai_provider)
-telemetry.meter_provider.force_flush()  # the zero series first, so every request is an increase
-
-class Outage:
-    name = settings.ai_provider
-    def parse_transaction(self, request):
-        raise AIUnavailableError("The AI provider is unavailable (smoke test)")
-    def generate_insights(self, request):
-        raise AIUnavailableError("The AI provider is unavailable (smoke test)")
-
-request = TransactionDraftRequest(
-    text={CANARY_AI_TEXT!r},
-    categories=[CategoryOption(id=1, name={CANARY_CATEGORY!r}, type="expense")],
-    today=datetime.date(2026, 11, 15),
-)
-provider = build_ai_provider(settings)
-provider.parse_transaction(request)
-# This process exports only when told to (it ends before the periodic export). A histogram can't
-# start at zero like the counters, so its first point goes out on its own: the rest then arrive
-# as an increase, which is what the dashboard's rate()/increase() queries need.
-telemetry.meter_provider.force_flush()
-for _ in range({AI_PARSES} - 1):
-    provider.parse_transaction(request)
-down = MeteredAIProvider(Outage())
-for _ in range({AI_OUTAGES}):
-    try:
-        down.parse_transaction(request)
-    except AIUnavailableError:
-        pass
-shutdown_telemetry()
-print("ai traffic sent")
-"""
-
-
-def wait_for(what: str, check: Callable[[], object], deadline: float = DEADLINE):
-    end = time.monotonic() + deadline
-    while True:
-        result = check()
-        if result:
-            return result
-        if time.monotonic() > end:
-            pytest.fail(f"Timed out after {deadline}s waiting for {what}")
-        time.sleep(1)
-
-
-class Backends:
-    """Prometheus, Loki and Tempo, through Grafana's data source proxy."""
-
-    def __init__(self, grafana: httpx.Client) -> None:
-        self.grafana = grafana
-
-    def prometheus(self, path: str, **params) -> dict:
-        response = self.grafana.get(
-            f"/api/datasources/proxy/uid/prometheus/api/v1/{path}", params=params
-        )
-        response.raise_for_status()
-        return response.json()
-
-    def query(self, expr: str) -> list[dict]:
-        result = self.prometheus("query", query=expr)
-        assert result["status"] == "success", (expr, result)
-        return result["data"]["result"]
-
-    def value(self, expr: str) -> float | None:
-        result = self.query(expr)
-        return float(result[0]["value"][1]) if result else None
-
-    def loki(self, query: str) -> list[dict]:
-        now = time.time_ns()
-        response = self.grafana.get(
-            "/api/datasources/proxy/uid/loki/loki/api/v1/query_range",
-            params={"query": query, "start": now - 3600 * 10**9, "end": now, "limit": 100},
-        )
-        response.raise_for_status()
-        return response.json()["data"]["result"]
-
-    def tempo(self, path: str, **params) -> httpx.Response:
-        return self.grafana.get(f"/api/datasources/proxy/uid/tempo/api/{path}", params=params)
-
 
 @pytest.fixture(scope="module")
 def backends(grafana: httpx.Client) -> Backends:
-    wait_for("Grafana", lambda: grafana.get("/api/health").json().get("database") == "ok")
-    backends = Backends(grafana)
+    backends = Backends(grafana)  # Grafana and its data sources are ready (conftest.py)
     # The app's zero series (metrics.initialize) arrived: from here on every event is an increase.
     wait_for(
         "the app's first metrics in Prometheus",
@@ -200,8 +107,14 @@ def traffic(stack: Stack, backends: Backends) -> Traffic:
             "/api/auth/login", json={"email": f"nobody-{CANARY}@example.com", "password": "x"}
         )
         assert unknown.status_code == 401
-    ai = stack.compose("exec", "-T", "app", "python", "-c", AI_TRAFFIC, timeout=120)
-    assert "ai traffic sent" in ai.stdout, ai.stdout + ai.stderr
+    ai_traffic.send(
+        stack,
+        text=CANARY_AI_TEXT,
+        category=CANARY_CATEGORY,
+        parses=AI_PARSES,
+        outages=AI_OUTAGES,
+        outage_message="The AI provider is unavailable (smoke test)",
+    )
     return Traffic(ids)
 
 
@@ -438,9 +351,12 @@ def test_no_canary_in_any_metric_label_metadata_or_dashboard(exported: Backends,
 
 
 def test_only_grafana_is_published_and_only_on_loopback(stack: Stack) -> None:
-    published = [
-        (p["URL"], p["TargetPort"])
-        for p in stack.services()["lgtm"]["Publishers"]
-        if p.get("PublishedPort")
-    ]
-    assert published == [("127.0.0.1", 3000)]  # no OTLP, Prometheus, Loki or Tempo port
+    published = {
+        name: [(p["URL"], p["TargetPort"]) for p in service["Publishers"] if p.get("PublishedPort")]
+        for name, service in stack.services().items()
+    }
+    # No OTLP, Prometheus, Loki, Tempo or alert receiver port; the app's is the local stack's own.
+    assert {name: ports for name, ports in published.items() if ports} == {
+        "app": [("127.0.0.1", 8000)],
+        "lgtm": [("127.0.0.1", 3000)],
+    }

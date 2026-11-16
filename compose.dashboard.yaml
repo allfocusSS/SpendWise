@@ -1,6 +1,7 @@
 # Local dashboard stack, for development and demos only: the API sends traces, metrics and logs
 # over OTLP/HTTP to Grafana's all-in-one LGTM image (an OpenTelemetry Collector, Prometheus, Loki,
-# Tempo and Grafana), which shows the SpendWise dashboard (docs/observability.md, "Dashboard").
+# Tempo and Grafana), which shows the SpendWise dashboard (docs/observability.md, "Dashboard")
+# and evaluates SpendWise's alert rules, notifying a local alert receiver (same doc, "Alerts").
 #
 #   docker compose -f compose.yaml -f compose.override.yaml -f compose.dashboard.yaml up -d --build
 #   open http://127.0.0.1:3000/d/spendwise-overview
@@ -8,7 +9,8 @@
 #
 # Never used on AWS or Render: the image needs well over 1 GiB of memory, which the production
 # t3.micro doesn't have. Only Grafana is published, on 127.0.0.1; the OTLP receiver, Prometheus,
-# Loki and Tempo are reachable from the app only. Independent of compose.observability.yaml.
+# Loki and Tempo are reachable from the app only, and the alert receiver from Grafana only.
+# Independent of compose.observability.yaml.
 
 services:
   app:
@@ -46,12 +48,17 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_USERS_VIEWERS_CAN_EDIT: "true"
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/custom/spendwise-overview.json
+      # Links in alert notifications (rule, dashboard, panel) point at this machine's Grafana.
+      GF_SERVER_ROOT_URL: http://127.0.0.1:${GRAFANA_PORT:-3000}/
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
     volumes:
       - ./deploy/observability/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro
       - ./deploy/observability/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/custom:ro
+      # Alert rules, the contact point and the notification policy, from Git (replaces the
+      # image's commented-out sample).
+      - ./deploy/observability/grafana/alerting:/otel-lgtm/grafana/conf/provisioning/alerting:ro
     healthcheck:
       # The image's own check: Grafana, Prometheus, Loki, Tempo and the Collector all ready.
       test: ["CMD", "/otel-lgtm/docker/healthcheck.sh"]
@@ -59,11 +66,40 @@ services:
       timeout: 5s
       retries: 60
       start_period: 30s
-    networks: [dashboard]
+    networks: [dashboard, alerting]
     security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  # Receives Grafana's alert notifications (the `spendwise-oncall-webhook` contact point) and
+  # keeps them as normalized incidents for the next step, the AI on-call responder. A single
+  # standard-library script (deploy/observability/alert-receiver/), mounted read-only into the
+  # official Python image: no build, no dependencies, no published port, no way out.
+  alert-receiver:
+    image: python:3.13.18-alpine3.24@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e
+    command: ["python", "-I", "-u", "/receiver/alert_receiver.py"]
+    user: "65534:65534"
+    read_only: true
+    volumes:
+      - ./deploy/observability/alert-receiver/alert_receiver.py:/receiver/alert_receiver.py:ro
+    # The only writable place: the incidents, in memory, gone with the container.
+    tmpfs:
+      - /var/lib/alert-receiver:size=1m,mode=0700,uid=65534,gid=65534
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), 2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [alerting]
     restart: unless-stopped
 
 networks:
   # The app and LGTM only (the database stays on "default"). Not internal: Grafana's port needs a
   # regular bridge network to be published (on 127.0.0.1 only).
   dashboard: {}
+  # Grafana and the alert receiver only. Internal: no route to the host or the internet.
+  alerting:
+    internal: true

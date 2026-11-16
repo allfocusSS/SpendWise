@@ -1,6 +1,6 @@
 # Developer shortcuts. Each target is also documented in README.md as a plain command.
 
-.PHONY: integration e2e observability dashboard
+.PHONY: integration e2e observability dashboard alerts
 
 # Integration tests against the real Docker Compose stack (built frontend, FastAPI, PostgreSQL).
 # Needs Docker (with Compose v2) and uv. Builds and starts its own isolated stack on port 18000,
@@ -31,3 +31,12 @@ observability:
 # make dashboard ARGS="-x"
 dashboard:
 	cd backend && uv run pytest dashboard_smoke $(ARGS)
+
+# Alerting, end to end: the same stack as the dashboard (Grafana LGTM plus the alert receiver).
+# Real traffic keeps every rule Normal; then AI parse failures fire "SpendWise AI Parse Failure
+# Rate High" (Normal, Pending, Alerting) and Grafana's webhook notification must reach the
+# receiver; healthy traffic resolves it; last, a stopped Prometheus must fire DatasourceError.
+# Needs Docker and uv; its own stack (app on 18400, Grafana on 127.0.0.1:13100), removed
+# afterwards. Takes about 5 minutes. Extra pytest arguments: make alerts ARGS="-x"
+alerts:
+	cd backend && uv run pytest alerts_smoke $(ARGS)
