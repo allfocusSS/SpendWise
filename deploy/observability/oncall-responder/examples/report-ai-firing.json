@@ -1,0 +1,216 @@
+{
+  "actions_executed": [],
+  "advisory_only": true,
+  "assessment": "50.0% of AI transaction parses failed over the last 5 minutes in local (alert threshold 10.0%). Causes below are inferences.",
+  "category": "ai",
+  "confidence": "medium",
+  "environment": "local",
+  "escalation_required": false,
+  "evidence": [
+    {
+      "available": true,
+      "basis": "observed",
+      "data": {
+        "category": "ai",
+        "environment": "local",
+        "measured_value": 0.5,
+        "severity": "warning",
+        "starts_at": "2026-11-16T09:02:10Z",
+        "status": "firing"
+      },
+      "id": "incident",
+      "query_id": "incident",
+      "source": "incident",
+      "summary": "Grafana reported this alert firing in local (severity warning, category ai); measured value 0.5."
+    },
+    {
+      "available": true,
+      "basis": "observed",
+      "data": [
+        {
+          "labels": {
+            "service_version": "d45128790c808e699050398a54264a0f0e7a5c94"
+          },
+          "value": 2.0
+        }
+      ],
+      "id": "prometheus:common.version",
+      "query_id": "common.version",
+      "source": "prometheus",
+      "summary": "common.version: service_version=d45128790c808e699050398a54264a0f0e7a5c94: 2.0"
+    },
+    {
+      "available": true,
+      "basis": "observed",
+      "data": [
+        {
+          "labels": {
+            "spendwise_ai_provider": "fake"
+          },
+          "value": 7.5
+        }
+      ],
+      "id": "prometheus:ai.requests",
+      "query_id": "ai.requests",
+      "source": "prometheus",
+      "summary": "ai.requests: spendwise_ai_provider=fake: 7.5"
+    },
+    {
+      "available": true,
+      "basis": "observed",
+      "data": [
+        {
+          "labels": {
+            "error_type": "provider",
+            "spendwise_ai_provider": "fake"
+          },
+          "value": 3.75
+        },
+        {
+          "labels": {
+            "error_type": "validation",
+            "spendwise_ai_provider": "fake"
+          },
+          "value": 0.0
+        }
+      ],
+      "id": "prometheus:ai.errors_by_type",
+      "query_id": "ai.errors_by_type",
+      "source": "prometheus",
+      "summary": "ai.errors_by_type: error_type=provider, spendwise_ai_provider=fake: 3.75; error_type=validation, spendwise_ai_provider=fake: 0.0"
+    },
+    {
+      "available": true,
+      "basis": "observed",
+      "data": [
+        {
+          "labels": {},
+          "value": 0.5
+        }
+      ],
+      "id": "prometheus:ai.failure_ratio",
+      "query_id": "ai.failure_ratio",
+      "source": "prometheus",
+      "summary": "ai.failure_ratio: 0.5"
+    },
+    {
+      "available": true,
+      "basis": "observed",
+      "data": [
+        {
+          "labels": {},
+          "value": 0.00475
+        }
+      ],
+      "id": "prometheus:ai.p95_duration",
+      "query_id": "ai.p95_duration",
+      "source": "prometheus",
+      "summary": "ai.p95_duration: 0.00475"
+    },
+    {
+      "available": true,
+      "basis": "observed",
+      "data": {
+        "levels": {
+          "error": 1
+        },
+        "lines": 1,
+        "loggers": {
+          "app.ai": 1
+        },
+        "messages": {
+          "unrecognised": 1
+        }
+      },
+      "id": "loki:logs.ai",
+      "query_id": "logs.ai",
+      "source": "loki",
+      "summary": "logs.ai: 1 application log lines in the last 15 minutes (error 1); 1 with a message the responder does not show"
+    },
+    {
+      "available": true,
+      "basis": "observed",
+      "data": [],
+      "id": "tempo:traces.errors",
+      "query_id": "traces.errors",
+      "source": "tempo",
+      "summary": "traces.errors: no matching traces in the last 15 minutes"
+    }
+  ],
+  "evidence_window": {
+    "logs_and_traces_seconds": 900,
+    "metrics_seconds": 300
+  },
+  "handoff": {
+    "authenticated": true,
+    "scheme": "hmac-sha256-v1"
+  },
+  "incident": {
+    "alert": "SpendWise AI Parse Failure Rate High",
+    "dashboard_url": "http://127.0.0.1:3000/d/spendwise-overview?from=1794816130000&orgId=1&to=1794819760032",
+    "ends_at": null,
+    "fingerprint": "a7edbaa05b9b86b7",
+    "grafana_url": "http://127.0.0.1:3000/alerting/grafana/spendwise-ai-parse-failures/view?orgId=1",
+    "kind": "condition",
+    "panel_url": "http://127.0.0.1:3000/d/spendwise-overview?from=1794816130000&orgId=1&to=1794819760032&viewPanel=19",
+    "received_at": "2026-11-16T09:02:40Z",
+    "rule_uid": "spendwise-ai-parse-failures",
+    "starts_at": "2026-11-16T09:02:10Z",
+    "status": "firing"
+  },
+  "likely_causes": [
+    {
+      "basis": "inference",
+      "cause": "The AI provider may be failing or unavailable: provider-type errors make up 100.0% of the recent AI parse failures.",
+      "certainty": "probable",
+      "evidence_ids": [
+        "prometheus:ai.errors_by_type",
+        "prometheus:ai.failure_ratio"
+      ]
+    }
+  ],
+  "limitations": [
+    "The provider's own status was not checked; any cause is inferred from error types.",
+    "Counts come from Prometheus increase() over 5 minutes, which extrapolates and can be fractional."
+  ],
+  "model": {
+    "answer": "accepted",
+    "name": "spendwise-fake-oncall",
+    "provider": "fake",
+    "version": "1"
+  },
+  "observed_at": "2026-11-16T09:02:40Z",
+  "recommended_actions": [
+    {
+      "action": "Open the dashboard's AI transaction parsing row and compare failures by error type with the evidence.",
+      "basis": "recommendation",
+      "kind": "investigate",
+      "requires_human_approval": true
+    },
+    {
+      "action": "Check the AI provider's own status page and any recent change to its credentials or quota.",
+      "basis": "recommendation",
+      "kind": "investigate",
+      "requires_human_approval": true
+    },
+    {
+      "action": "Watch the failure ratio; it should fall under the threshold once the provider recovers.",
+      "basis": "recommendation",
+      "kind": "monitor",
+      "requires_human_approval": true
+    },
+    {
+      "action": "If the provider stays down, a human can decide whether to switch AI entry off until it recovers; manual entry keeps working.",
+      "basis": "recommendation",
+      "kind": "human_change",
+      "requires_human_approval": true
+    }
+  ],
+  "report_id": "9c53cbea7c188268",
+  "schema": "spendwise.oncall.report.v1",
+  "severity": "warning",
+  "verification_steps": [
+    "The dashboard's parse success rate returns above 90%.",
+    "New AI parse requests rise while parse failures stay flat."
+  ]
+}

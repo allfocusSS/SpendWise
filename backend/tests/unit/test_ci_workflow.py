@@ -26,6 +26,7 @@ TEST_JOBS = {
     "observability",
     "dashboard",
     "alerts",
+    "oncall",
 }
 PINNED_ACTION = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
 
@@ -121,6 +122,23 @@ def test_the_alerts_job_runs_the_alert_smoke_test(workflow) -> None:
     assert job["timeout-minutes"] <= 30
 
 
+def test_the_oncall_job_runs_the_ai_oncall_smoke_test(workflow) -> None:
+    job = workflow["jobs"]["oncall"]
+    assert job["name"] == "Observability AI On-call"
+    name = "AI on-call (builds the image, Compose stack + Grafana LGTM + receiver + responder)"
+    assert step(job, name)["run"] == "make oncall"
+    makefile = (ROOT / "Makefile").read_text()
+    assert "oncall:\n\tcd backend && uv run pytest oncall_smoke $(ARGS)" in makefile
+    cleanup = step(job, "Remove the test stack and its volume")
+    assert cleanup["if"] == "always()"
+    assert cleanup["run"] == "uv run python -m integration.stack down --oncall"
+    assert cleanup["env"]["SPENDWISE_IT_PROJECT"] == "spendwise-oncall"
+    assert step(job, "Upload Compose logs")["if"] == "failure()"
+    # Parallel with the other jobs; the workflow's read-only token only; no secret, no OIDC token.
+    assert "needs" not in job and "permissions" not in job
+    assert "secrets." not in yaml.dump(job) and job["timeout-minutes"] <= 30
+
+
 def test_every_job_runs_on_a_github_hosted_runner(workflow) -> None:
     # No self-hosted runner anywhere, in particular none on the production host.
     for name, job in workflow["jobs"].items():
@@ -172,7 +190,10 @@ def test_no_static_aws_credentials_tokens_or_secrets_anywhere() -> None:
 
 def test_the_gateway_and_alert_receiver_code_is_linted_in_ci(workflow) -> None:
     backend = workflow["jobs"]["backend"]
-    paths = ". ../deploy/aws/gateway ../deploy/observability/alert-receiver"
+    paths = (
+        ". ../deploy/aws/gateway ../deploy/observability/alert-receiver"
+        " ../deploy/observability/oncall-responder"
+    )
     assert step(backend, "Lint")["run"] == f"uv run ruff check {paths}"
     assert step(backend, "Format check")["run"] == f"uv run ruff format --check {paths}"
 

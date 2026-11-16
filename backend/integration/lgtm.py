@@ -33,6 +33,8 @@ def serve(
     port: int,
     grafana_port: int,
     image: str,
+    compose_files: tuple[Path, ...] = DASHBOARD_FILES,
+    extra_env: dict[str, str] | None = None,
 ) -> Iterator[Stack]:
     env = os.environ
     stack = Stack(
@@ -40,8 +42,11 @@ def serve(
         port=int(env.get(f"{prefix}_PORT", str(port))),
         image=env.get(f"{prefix}_IMAGE", image),
         keep=env.get(f"{prefix}_KEEP") == "1",
-        compose_files=DASHBOARD_FILES,
-        extra_env={"GRAFANA_PORT": env.get(f"{prefix}_GRAFANA_PORT", str(grafana_port))},
+        compose_files=compose_files,
+        extra_env={
+            "GRAFANA_PORT": env.get(f"{prefix}_GRAFANA_PORT", str(grafana_port)),
+            **(extra_env or {}),
+        },
     )
     try:
         stack.check_prerequisites()

@@ -30,6 +30,7 @@ backend/integration
 backend/observability_smoke
 backend/dashboard_smoke
 backend/alerts_smoke
+backend/oncall_smoke
 
 # Node / frontend (the image builds its own node_modules and dist)
 **/node_modules

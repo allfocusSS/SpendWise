@@ -811,7 +811,8 @@ also fails if the page throws an uncaught error or the server answers 5xx.
 The API can send traces, metrics and logs over OTLP/HTTP to an OpenTelemetry Collector,
 including its own application metrics: saved transactions, failed saves, AI parsing and refused
 sign-ins. It's off by default, and not yet enabled in development or production. Locally,
-Grafana also evaluates SpendWise's alert rules and notifies a local webhook receiver. To try it:
+Grafana also evaluates SpendWise's alert rules and notifies a local webhook receiver, and an
+advisory AI on-call responder can turn those alerts into reports. To try it:
 
 ```bash
 # The SpendWise dashboard in Grafana (Prometheus, Loki, Tempo), on http://127.0.0.1:3000,
@@ -825,7 +826,14 @@ docker compose -f compose.yaml -f compose.override.yaml -f compose.observability
 make observability     # automated: traces, metrics and logs must all reach the Collector
 make dashboard         # automated: metrics in Prometheus, the dashboard, logs in Loki, traces in Tempo
 make alerts            # automated: an alert fires, reaches the webhook receiver, and resolves
+make oncall            # automated: that alert reaches the AI on-call responder, which reports on it
 ```
+
+The AI on-call responder (`compose.oncall.yaml`, an overlay on the dashboard stack; start it with a
+random `ONCALL_HMAC_SECRET`, see the docs) reads each incident, collects bounded read-only evidence
+from Prometheus, Loki and Tempo through fixed queries, asks a deterministic fake model, and
+stores a structured report. It is advisory only (a human approves every change), needs no API
+key, and runs only in this local stack, so it is not 24/7 paging.
 
 The Grafana stack, its alerts included, is for development, demos and CI only; it never runs on
 AWS or Render, so nothing pages anyone around the clock yet.
@@ -842,7 +850,7 @@ only through `.github/workflows/promote-production.yml`, run by hand
 
 | Job | What it runs | Same thing locally |
 |---|---|---|
-| Backend (lint + test) | Ruff lint and format check (also of the AWS deploy gateway and the alert receiver), pytest on SQLite, OpenAPI spec up to date | `cd backend && uv run ruff check . ../deploy/aws/gateway ../deploy/observability/alert-receiver && uv run ruff format --check . ../deploy/aws/gateway ../deploy/observability/alert-receiver && uv run pytest && uv run python scripts/export_openapi.py --check` |
+| Backend (lint + test) | Ruff lint and format check (also of the AWS deploy gateway, the alert receiver and the on-call responder), pytest on SQLite, OpenAPI spec up to date | `cd backend && uv run ruff check . ../deploy/aws/gateway ../deploy/observability/alert-receiver ../deploy/observability/oncall-responder && uv run ruff format --check . ../deploy/aws/gateway ../deploy/observability/alert-receiver ../deploy/observability/oncall-responder && uv run pytest && uv run python scripts/export_openapi.py --check` |
 | Backend (PostgreSQL) | the same pytest suite against a PostgreSQL 18 service container | `cd backend && TEST_DATABASE_URL=postgresql+psycopg://... uv run pytest` (see [Run the tests on PostgreSQL](#run-the-tests-on-postgresql)) |
 | Frontend | oxlint, generated API types match `openapi.json`, typecheck (app and e2e tests), Vitest, production build | `cd frontend && npm ci && npm run lint && npm run generate:api && git diff --exit-code src/api/schema.d.ts && npm run typecheck && npm test && npm run build` |
 | Integration | builds the image and runs the real Compose stack (PostgreSQL), then the integration suite | `make integration` |
@@ -850,9 +858,10 @@ only through `.github/workflows/promote-production.yml`, run by hand
 | Observability (OpenTelemetry) | builds the image and runs the Compose stack with an OpenTelemetry Collector; real traffic must produce spans, metric data points and log records at the Collector, with the right resource, trace context in the logs and nothing sensitive in any of them | `make observability` |
 | Observability Dashboard | builds the image and runs the Compose stack with Grafana's LGTM image; real traffic (including controlled failures) must give exact business-metric counts in Prometheus, a provisioned dashboard whose queries all work, logs in Loki and traces in Tempo, and no user data in any metric label | `make dashboard` |
 | Observability Alerts | the same stack with the alert rules and the local alert receiver; quiet traffic must keep every rule Normal, AI parse failures must take an alert from Normal through Pending to Alerting and deliver the webhook notification, recovery must resolve it, a stopped Prometheus must fire DatasourceError, and no user data may reach any alert | `make alerts` |
+| Observability AI On-call | the alerts stack plus the AI on-call responder; the controlled AI outage must produce a report that references the firing incident, through a valid HMAC-signed handoff (a replay and a forged signature are refused), from only the allowlisted read-only evidence queries and the fake model; a hostile incident and log line must change nothing, no canary or secret may reach any report or log, and nothing in the stack may change | `make oncall` |
 | All checks passed | succeeds only if every job above succeeded | |
 
-The eight test jobs run in parallel; a full run takes roughly as long as the slowest job:
+The nine test jobs run in parallel; a full run takes roughly as long as the slowest job:
 End-to-end, which builds the image and installs Chromium before the tests, or Observability
 Alerts, which waits for real alert timings (about five minutes once its stack is up). Use "All
 checks passed" as the single required status check in branch protection.
@@ -867,8 +876,8 @@ unfinished run. Runs on `main` are never cancelled, so every commit on `main` ge
   `browser-log.txt` and a page snapshot for each failed test, plus `compose-logs.txt` with the
   container logs of the run;
 - `integration-compose-logs`: the container logs of the integration run;
-- `dashboard-compose-logs`, `alerts-compose-logs`: the container logs of those runs (Grafana's
-  LGTM stack and the alert receiver included).
+- `dashboard-compose-logs`, `alerts-compose-logs`, `oncall-compose-logs`: the container logs of
+  those runs (Grafana's LGTM stack, the alert receiver and the on-call responder included).
 
 The integration job also prints the container logs in its output when a test fails.
 
@@ -914,4 +923,7 @@ make dashboard
 
 # Grafana alerting end to end: a rule fires, notifies the local receiver, resolves
 make alerts
+
+# The AI on-call responder end to end: the alert becomes an advisory report
+make oncall
 ```
