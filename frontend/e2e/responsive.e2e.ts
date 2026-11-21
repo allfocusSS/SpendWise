@@ -5,7 +5,7 @@
 import { expect, test } from './support/fixtures'
 import { addTransaction, entry, expectNoHorizontalOverflow, goTo, kzt, mainNav } from './support/app'
 
-const PAGES = ['Dashboard', 'Transactions', 'Categories', 'Analytics'] as const
+const PAGES = ['Overview', 'Transactions', 'Categories', 'Analytics'] as const
 
 test.describe('Responsive layout', { tag: '@mobile' }, () => {
   test('every page fits the screen and the navigation reaches it', async ({ page, account }) => {

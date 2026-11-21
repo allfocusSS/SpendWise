@@ -112,6 +112,25 @@ test.describe('Transactions', () => {
     await expect(entry(ledger(page), 'Logo design')).toBeVisible()
   })
 
+  test('saving and deleting are confirmed by a short message that goes away on its own', async ({ page }) => {
+    const message = (text: string) => page.getByRole('status').filter({ hasText: text })
+
+    await addTransaction(page, LEDGER[2])
+    await expect(message('Expense added')).toBeVisible()
+    await expect(message('Expense added')).toHaveCount(0, { timeout: 8_000 })
+
+    await ledger(page).getByRole('button', { name: 'Edit Bus ticket' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Edit transaction' })
+    await fillTransaction(dialog, { description: 'Bus pass' })
+    await dialog.getByRole('button', { name: 'Save changes' }).click()
+    await expect(message('Transaction updated')).toBeVisible()
+
+    await ledger(page).getByRole('button', { name: 'Delete Bus pass' }).click()
+    await page.getByRole('dialog', { name: 'Delete transaction?' }).getByRole('button', { name: 'Delete' }).click()
+    await expect(message('Transaction deleted')).toBeVisible()
+    await expect(ledger(page)).toContainText('No transactions yet')
+  })
+
   test('the form explains invalid input and saves nothing', async ({ page }) => {
     await page.getByRole('banner').getByRole('button', { name: 'Add transaction' }).click()
     const dialog = page.getByRole('dialog', { name: 'New transaction' })

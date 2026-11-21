@@ -1,30 +1,32 @@
 @import 'tailwindcss';
 
 /*
- * SpendWise design system — "Graphite" (dark fintech).
- * Style: dark, restrained. Hairline rules over boxes, sentence-case labels, no glass, no glow.
- * Every text/background pair below was measured for WCAG AA (lowest pair 5.3:1). Components use
- * these tokens, never raw hex values. Chart series colours live in lib/chartColors.ts.
+ * SpendWise design system: "Plum" (dark plum fintech, approved prototype in the design review).
+ * Plum surfaces layered by lightness, borderless cards, one solid violet for the primary action and
+ * the active segment (no gradients or glows), emerald and rose for amounts, violet and pink chart
+ * series. Every text/background pair below was measured for WCAG AA (lowest text pair: ink-subtle
+ * on surface-selected, 5.1:1; field borders 3.5:1). Components use these tokens, never raw hex
+ * values. Chart series colours live in lib/chartColors.ts.
  */
 @theme {
-  /* Typography: Inter throughout; figures use tabular numerals so columns align. */
+  /* Typography: Inter (optical sizes) throughout; figures use tabular numerals so columns align. */
   --font-sans: 'Inter Variable', Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 
-  /* Type scale: few sizes, sentence case, weight does the work instead of capitals. */
-  --text-display: 3.25rem;
-  --text-display--line-height: 1;
+  /* Type scale: few sizes, sentence case, weight does the work. */
+  --text-display: 2.875rem;
+  --text-display--line-height: 1.06;
   --text-display--letter-spacing: -0.035em;
-  --text-display--font-weight: 600;
-  --text-figure-lg: 2.125rem;
-  --text-figure-lg--line-height: 1.05;
-  --text-figure-lg--letter-spacing: -0.03em;
-  --text-figure-lg--font-weight: 600;
+  --text-display--font-weight: 650;
+  --text-figure-lg: 1.875rem;
+  --text-figure-lg--line-height: 1.1;
+  --text-figure-lg--letter-spacing: -0.035em;
+  --text-figure-lg--font-weight: 650;
   --text-figure: 1.5rem;
-  --text-figure--line-height: 1.1;
-  --text-figure--letter-spacing: -0.025em;
-  --text-figure--font-weight: 600;
-  --text-title: 1.75rem;
-  --text-title--line-height: 1.15;
+  --text-figure--line-height: 1.15;
+  --text-figure--letter-spacing: -0.03em;
+  --text-figure--font-weight: 650;
+  --text-title: 1.625rem;
+  --text-title--line-height: 1.2;
   --text-title--letter-spacing: -0.025em;
   --text-title--font-weight: 600;
   --text-heading: 1rem;
@@ -34,47 +36,69 @@
   --text-label: 0.8125rem;
   --text-label--line-height: 1.4;
 
-  /* Graphite surfaces */
-  --color-canvas: #0a0c10;
-  --color-surface: #12151c;
-  --color-surface-raised: #191d26;
-  --color-surface-muted: #161a22;
-  --color-surface-sunken: #0e1116;
-  --color-line: #232834;
-  --color-line-strong: #323949;
+  /* Plum surfaces: one hue, layered by lightness (canvas < sunken < surface < raised < selected) */
+  --color-canvas: #15112a;
+  --color-surface-sunken: #191431;
+  --color-surface: #1e1938;
+  --color-surface-raised: #272046;
+  --color-surface-muted: #231d40;
+  --color-surface-selected: #30285a;
+  --color-line: #2e2750;
+  --color-line-strong: #3d3566;
+  /* Boundaries of inputs and other controls: 3.5:1 on raised surfaces (WCAG 1.4.11) */
+  --color-field: #7d72b0;
 
-  /* Text on graphite */
-  --color-ink: #eef1f6;
-  --color-ink-muted: #a6afbf;
-  --color-ink-subtle: #8892a4;
+  /* Text on plum */
+  --color-ink: #f5f3fb;
+  --color-ink-muted: #c4bddc;
+  --color-ink-subtle: #a39bc4;
 
-  /* Signature accent: gold, used sparingly (brand mark, primary action, focus) */
-  --color-accent: #f5b544;
-  --color-accent-strong: #ffc65e;
-  --color-accent-soft: rgb(245 181 68 / 0.12);
-  --color-on-accent: #14110a;
+  /* Brand: violet text and focus, one solid violet for the primary action (bg-brand; white text 5.7:1) */
+  --color-accent: #b9a5ff;
+  --color-accent-strong: #d3c6ff;
+  --color-accent-soft: rgb(138 114 255 / 0.14);
+  --color-on-accent: #ffffff;
+  --color-focus: #c4b5fd;
+  --color-brand: #7c3aed;
+  --color-brand-hover: #6d28d9;
 
-  /* Money semantics (text tokens ≥ 7.9:1 on surfaces; solid fills carry white text ≥ 5.3:1) */
-  --color-income: #3ddc97;
-  --color-income-soft: rgb(61 220 151 / 0.1);
-  --color-income-solid: #0b7a55;
-  --color-income-chart: #12a07a;
-  --color-expense: #ff8a73;
-  --color-expense-soft: rgb(255 138 115 / 0.1);
-  --color-expense-solid: #c13a30;
-  --color-expense-chart: #ec5f53;
-  --color-net: #6a7ff0;
+  /* Money: emerald and rose for amounts (text ≥ 6.7:1 on cards); violet and pink chart series */
+  --color-income: #4ade80;
+  --color-income-soft: rgb(74 222 128 / 0.12);
+  --color-income-chart: #8a72ff;
+  --color-expense: #ff7a95;
+  --color-expense-soft: rgb(255 122 149 / 0.12);
+  --color-expense-chart: #e04f8c;
+  --color-net: #c4b5fd;
 
-  /* Feedback: danger is for errors and destructive actions (pink-red, distinct from expenses) */
+  /* Feedback: danger is for errors and destructive actions */
   --color-danger: #ff6b81;
-  --color-danger-strong: #e2485f;
-  --color-danger-soft: rgb(255 107 129 / 0.1);
-  --color-warning: #f5b544;
+  --color-danger-strong: #be123c;
+  --color-danger-soft: rgb(255 107 129 / 0.12);
+  --color-warning: #fbbf24;
 
   /* Shape and elevation */
-  --radius-card: 10px;
-  --radius-control: 6px;
-  --shadow-pop: 0 24px 64px -16px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(255 255 255 / 0.06);
+  --radius-card: 14px;
+  --radius-control: 10px;
+  --shadow-pop: 0 24px 64px -16px rgb(0 0 0 / 0.75), 0 0 0 1px rgb(255 255 255 / 0.07);
+}
+
+/* Devices with a mouse or trackpad (hover is possible); touch screens never match. */
+@custom-variant can-hover (@media (hover: hover));
+
+/* Row actions on a list row: hidden until the row is hovered or focused; with a mouse they float
+   over the row's right end instead of keeping empty space there. On touch screens they stay
+   visible, in the row. The row needs `group relative`. */
+@utility row-actions-overlay {
+  @media (hover: hover) {
+    position: absolute;
+    top: 50%;
+    right: 10px;
+    translate: 0 -50%;
+    padding: 4px;
+    border-radius: 10px;
+    background: var(--color-surface-selected);
+  }
 }
 
 @layer base {
@@ -84,11 +108,11 @@
 
   body {
     @apply bg-canvas font-sans text-ink antialiased;
-    font-feature-settings: 'ss01', 'ss03';
+    font-feature-settings: 'ss01', 'cv11';
   }
 
   ::selection {
-    background: rgb(245 181 68 / 0.3);
+    background: rgb(138 114 255 / 0.35);
   }
 
   /* Tailwind v4 no longer gives buttons a pointer cursor; every clickable control gets one. */

@@ -4,7 +4,7 @@ import { Link, useLocation } from 'react-router'
 import { ApiError } from '../api/client'
 import { useLogin } from '../api/queries'
 import { AuthLayout } from '../components/AuthLayout'
-import { Button, Field, FormError, linkClass } from '../components/ui'
+import { Button, Field, FormError, linkClass, PasswordInput } from '../components/ui'
 import { describedBy, inputClass } from '../lib/styles'
 
 type Errors = Partial<Record<'email' | 'password', string>>
@@ -36,10 +36,12 @@ export function LoginPage() {
     <AuthLayout
       title="Log in"
       description="Welcome back to SpendWise."
+      headline="Know where every tenge goes."
+      lead="Write down what comes in and what goes out. SpendWise adds it up by month and by category."
       footer={
         <>
-          No account yet?{' '}
-          <Link to="/register" state={location.state} className={linkClass}>Create one</Link>
+          New to SpendWise?{' '}
+          <Link to="/register" state={location.state} className={linkClass}>Create an account</Link>
         </>
       }
     >
@@ -55,19 +57,18 @@ export function LoginPage() {
             onChange={(e) => setEmail(e.target.value)}
             aria-invalid={!!fieldErrors.email}
             aria-describedby={describedBy('login-email', fieldErrors.email)}
-            className={inputClass(!!fieldErrors.email)}
+            className={inputClass(!!fieldErrors.email, 'lg')}
           />
         </Field>
         <Field id="login-password" label="Password" error={fieldErrors.password}>
-          <input
+          <PasswordInput
             id="login-password"
-            type="password"
             autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             aria-invalid={!!fieldErrors.password}
             aria-describedby={describedBy('login-password', fieldErrors.password)}
-            className={inputClass(!!fieldErrors.password)}
+            hasError={!!fieldErrors.password}
           />
         </Field>
         <Button type="submit" size="lg" disabled={login.isPending} className="mt-1 w-full">

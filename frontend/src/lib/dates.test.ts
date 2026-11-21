@@ -7,6 +7,7 @@ import {
   formatDateRange,
   formatMonth,
   formatMonthSpan,
+  formatRecentDate,
   fromIsoDate,
   fromMonthKey,
   monthKey,
@@ -63,6 +64,17 @@ describe('formatting', () => {
     expect(formatDate('2026-10-20')).toBe('20 Oct 2026')
     expect(formatMonth('2026-10')).toBe('Oct 2026')
     expect(formatMonth('2026-10', true)).toBe('Oct')
+  })
+
+  it('formats recent dates relative to today, in the local calendar', () => {
+    const today = new Date(2026, 10, 17, 0, 30) // just after midnight
+    expect(formatRecentDate('2026-11-17', today)).toBe('Today')
+    expect(formatRecentDate('2026-11-16', today)).toBe('Yesterday')
+    expect(formatRecentDate('2026-11-15', today)).toBe('Sun 15 Nov')
+    expect(formatRecentDate('2026-01-01', today)).toBe('Thu 1 Jan')
+    expect(formatRecentDate('2025-12-31', today)).toBe('31 Dec 2025')
+    // Across a daylight-saving change the day count still rounds to whole days.
+    expect(formatRecentDate('2026-03-28', new Date(2026, 2, 29, 23, 0))).toBe('Yesterday')
   })
 })
 

@@ -1,18 +1,27 @@
-import { useId, type ButtonHTMLAttributes, type ComponentType, type ReactNode, type SVGProps } from 'react'
+import {
+  useId,
+  useState,
+  type ButtonHTMLAttributes,
+  type ComponentType,
+  type InputHTMLAttributes,
+  type ReactNode,
+  type SelectHTMLAttributes,
+  type SVGProps,
+} from 'react'
 
-import { formatKzt } from '../lib/money'
-import { cardClass } from '../lib/styles'
-import { AlertIcon, RefreshIcon, SearchIcon } from './icons'
+import { formatKzt, formatSignedKzt } from '../lib/money'
+import { cardClass, fieldFrame, inputClass } from '../lib/styles'
+import { AlertIcon, ChevronDownIcon, RefreshIcon, SearchIcon } from './icons'
 
 type IconComponent = ComponentType<SVGProps<SVGSVGElement>>
 
 // --- Buttons ---------------------------------------------------------------------
 
 const buttonVariants = {
-  primary: 'bg-accent text-on-accent hover:bg-accent-strong focus-visible:outline-accent',
-  secondary: 'border border-line-strong text-ink hover:bg-white/[0.04] focus-visible:outline-accent',
-  danger: 'bg-danger text-on-accent hover:bg-danger-strong focus-visible:outline-danger',
-  ghost: 'text-ink-muted hover:bg-white/5 hover:text-ink focus-visible:outline-accent',
+  primary: 'bg-brand text-on-accent hover:bg-brand-hover focus-visible:outline-focus',
+  secondary: 'bg-surface-raised text-ink ring-1 ring-line-strong ring-inset hover:bg-surface-selected focus-visible:outline-focus',
+  danger: 'bg-danger-strong text-white hover:brightness-110 focus-visible:outline-danger',
+  ghost: 'text-ink-muted hover:bg-white/5 hover:text-ink focus-visible:outline-focus',
 }
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -20,13 +29,13 @@ type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   size?: 'sm' | 'md' | 'lg'
 }
 
-const buttonSizes = { sm: 'h-8 px-3 text-label', md: 'h-9 px-3.5 text-sm', lg: 'h-11 px-5 text-sm' }
+const buttonSizes = { sm: 'h-8 px-3 text-label', md: 'h-10 px-4 text-sm', lg: 'h-12 px-5 text-[15px]' }
 
 export function Button({ variant = 'primary', size = 'md', className = '', type = 'button', ...props }: ButtonProps) {
   return (
     <button
       type={type}
-      className={`inline-flex shrink-0 items-center justify-center gap-1.5 rounded-[var(--radius-control)] font-medium whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${buttonSizes[size]} ${buttonVariants[variant]} ${className}`}
+      className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-[var(--radius-control)] font-semibold whitespace-nowrap transition-[color,background-color,filter] focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${buttonSizes[size]} ${buttonVariants[variant]} ${className}`}
       {...props}
     />
   )
@@ -39,14 +48,14 @@ export function IconButton({ label, children, tone = 'default', className = '', 
 }) {
   const colors =
     tone === 'danger'
-      ? 'text-ink-subtle hover:bg-danger-soft hover:text-danger focus-visible:outline-danger'
-      : 'text-ink-subtle hover:bg-white/5 hover:text-ink focus-visible:outline-accent'
+      ? 'text-danger hover:bg-danger-soft focus-visible:outline-danger'
+      : 'text-ink-subtle hover:bg-white/5 hover:text-ink focus-visible:outline-focus'
   return (
     <button
       type="button"
       aria-label={label}
       title={label}
-      className={`grid size-7 shrink-0 place-items-center rounded-md transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 ${colors} ${className}`}
+      className={`grid size-8 shrink-0 place-items-center rounded-lg bg-surface-raised transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 ${colors} ${className}`}
       {...props}
     >
       {children}
@@ -70,62 +79,49 @@ export function Card({ title, subtitle, action, children, className = '', flush 
   return (
     <section className={`${cardClass} flex min-w-0 flex-col ${className}`} aria-labelledby={title ? headingId : undefined}>
       {(title || action) && (
-        <div className={`flex flex-wrap items-start justify-between gap-x-3 gap-y-2 px-5 pt-4 ${flush ? 'border-b border-line pb-3' : 'pb-1'}`}>
+        <div className={`flex flex-wrap items-start justify-between gap-x-3 gap-y-1.5 px-5 pt-[18px] ${flush ? 'pb-3' : 'pb-1'}`}>
           <div className="min-w-0">
             {title && (
-              <h2 id={headingId} className="truncate text-heading text-ink">
+              <h2 id={headingId} className="text-heading text-ink">
                 {title}
               </h2>
             )}
-            {subtitle && <p className="mt-0.5 truncate text-label text-ink-subtle">{subtitle}</p>}
+            {subtitle && <p className="mt-0.5 text-xs text-ink-subtle">{subtitle}</p>}
           </div>
-          {action && <div className="flex shrink-0 items-center gap-2">{action}</div>}
+          {action && <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-subtle">{action}</div>}
         </div>
       )}
-      <div className={`flex-1 ${flush ? '' : 'px-5 pt-3 pb-5'}`}>{children}</div>
+      <div className={`flex-1 ${flush ? '' : 'px-5 pt-3 pb-[18px]'}`}>{children}</div>
     </section>
   )
 }
 
-/** Page heading: title and one line of context, controls on the right. */
-export function PageHeader({ title, description, action }: {
+/**
+ * Page heading: title and one line of context, controls on the right. Below lg the title lives in
+ * the app bar (the Layout's h1), so only the controls show here.
+ */
+export function PageHeader({ title, eyebrow, description, action }: {
   title: string
+  /** A short line above the title, e.g. today's date. */
+  eyebrow?: ReactNode
   description?: ReactNode
   action?: ReactNode
 }) {
   return (
-    <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-      <div className="min-w-0 flex-1">
+    <div className={`mb-3.5 flex flex-col gap-3 lg:mb-[18px] lg:min-h-[52px] lg:flex-row lg:items-center lg:justify-between ${action ? '' : 'max-lg:hidden'}`}>
+      <div className="hidden min-w-0 flex-1 lg:block">
+        {eyebrow && <p className="text-label text-ink-subtle">{eyebrow}</p>}
         <h1 className="text-title text-ink">{title}</h1>
-        {description && <p className="mt-1 text-sm text-ink-muted">{description}</p>}
+        {description && <p className="mt-0.5 text-label text-ink-subtle">{description}</p>}
       </div>
-      {action && <div className="flex shrink-0 flex-wrap items-center gap-2">{action}</div>}
+      {action && <div className="flex flex-wrap items-center gap-2.5 lg:shrink-0 lg:justify-end">{action}</div>}
     </div>
   )
 }
 
 /** "View all →" style link placed in a section header. */
 export const linkClass =
-  'inline-flex items-center gap-1 rounded-sm text-label font-medium text-ink-muted underline-offset-4 hover:text-ink hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
-
-/** Open section: a heading row over a hairline rule, no box. For content that reads as a list or ledger. */
-export function Section({ title, action, children, className = '' }: {
-  title: string
-  action?: ReactNode
-  children: ReactNode
-  className?: string
-}) {
-  const headingId = useId()
-  return (
-    <section className={`min-w-0 ${className}`} aria-labelledby={headingId}>
-      <div className="flex items-end justify-between gap-3 pb-3">
-        <h2 id={headingId} className="text-heading text-ink">{title}</h2>
-        {action}
-      </div>
-      {children}
-    </section>
-  )
-}
+  'inline-flex items-center gap-1 rounded-sm text-label font-semibold text-accent underline-offset-4 hover:text-accent-strong hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus'
 
 // --- Inputs ----------------------------------------------------------------------
 
@@ -145,21 +141,57 @@ export function SearchInput({ label, value, onChange, placeholder, className = '
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="h-10 w-full rounded-[var(--radius-control)] border border-line bg-surface-sunken pr-3 pl-9 text-base text-ink sm:h-9 sm:text-sm placeholder:text-ink-subtle/70 hover:border-line-strong focus:border-accent focus:ring-3 focus:ring-accent/15 focus:outline-none"
+        className="h-[42px] w-full rounded-[var(--radius-control)] border border-field bg-surface-raised pr-3 pl-9 text-base text-ink sm:text-sm placeholder:text-ink-subtle focus:border-focus focus:ring-3 focus:ring-focus/25 focus:outline-none pointer-coarse:h-11"
       />
     </div>
   )
 }
 
+/** A native select styled like the text inputs, with a chevron. `className` sizes the wrapper. */
+export function Select({ className = '', hasError = false, ...props }: SelectHTMLAttributes<HTMLSelectElement> & { hasError?: boolean }) {
+  return (
+    <div className={`relative ${className}`}>
+      <select className={`${inputClass(hasError)} appearance-none pr-9`} {...props} />
+      <ChevronDownIcon className="pointer-events-none absolute top-1/2 right-3 size-4 -translate-y-1/2 text-ink-subtle" />
+    </div>
+  )
+}
+
+/**
+ * A password input with a Show / Hide button inside its border (the button says what it will do).
+ * Takes the input's own props; the box carries the focus ring.
+ */
+export function PasswordInput({ hasError = false, ...props }: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & { hasError?: boolean }) {
+  const [visible, setVisible] = useState(false)
+  return (
+    <div className={`flex h-12 items-center gap-1 rounded-[var(--radius-control)] border bg-surface-raised pr-1 focus-within:ring-3 ${fieldFrame(hasError)}`}>
+      <input
+        {...props}
+        type={visible ? 'text' : 'password'}
+        className="h-full min-w-0 flex-1 rounded-[var(--radius-control)] bg-transparent px-3 text-base text-ink focus:outline-none sm:text-sm"
+      />
+      <button
+        type="button"
+        onClick={() => setVisible((v) => !v)}
+        className="h-10 shrink-0 rounded-lg px-3 text-label font-semibold text-accent transition-colors hover:bg-white/5 hover:text-accent-strong focus-visible:outline-2 focus-visible:outline-focus"
+      >
+        {visible ? 'Hide' : 'Show'}
+        <span className="sr-only"> password</span>
+      </button>
+    </div>
+  )
+}
+
 /** Segmented toggle: hairline container with a raised active segment. */
-export function Segmented<T extends string>({ label, options, value, onChange }: {
+export function Segmented<T extends string>({ label, options, value, onChange, className = '' }: {
   label: string
   options: { value: T; label: string; icon?: IconComponent }[]
   value: T
   onChange: (value: T) => void
+  className?: string
 }) {
   return (
-    <div role="group" aria-label={label} className="inline-flex max-w-full flex-wrap gap-0.5 rounded-[var(--radius-control)] border border-line bg-surface-sunken p-0.5">
+    <div role="group" aria-label={label} className={`inline-flex max-w-full flex-wrap gap-0.5 rounded-[11px] border border-line bg-surface p-[3px] ${className}`}>
       {options.map(({ value: optionValue, label: optionLabel, icon: Icon }) => {
         const active = value === optionValue
         return (
@@ -168,8 +200,8 @@ export function Segmented<T extends string>({ label, options, value, onChange }:
             type="button"
             aria-pressed={active}
             onClick={() => onChange(optionValue)}
-            className={`inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-label font-medium whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent ${
-              active ? 'bg-surface-raised text-ink shadow-[0_1px_2px_rgb(0_0_0/0.4)] ring-1 ring-line-strong' : 'text-ink-subtle hover:text-ink'
+            className={`inline-flex h-[34px] items-center justify-center gap-1.5 rounded-lg px-3.5 text-label whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus pointer-coarse:h-10 ${
+              active ? 'bg-brand font-semibold text-on-accent' : 'font-medium text-ink-muted hover:text-ink'
             }`}
           >
             {Icon && <Icon className="size-3.5" />}
@@ -202,7 +234,7 @@ export function LoadingState({ label }: { label?: string }) {
 
 /** Placeholder block shown while data loads. */
 export function Skeleton({ className = '' }: { className?: string }) {
-  return <div className={`animate-pulse rounded bg-white/[0.06] ${className}`} aria-hidden="true" />
+  return <div className={`animate-pulse rounded-md bg-white/[0.07] ${className}`} aria-hidden="true" />
 }
 
 /** Placeholder rows for lists and tables, with an accessible loading label. */
@@ -241,15 +273,27 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
   )
 }
 
+/** Decorative icon in a soft ring, above an empty state's title. */
+export function EmptyIcon({ children }: { children: ReactNode }) {
+  return (
+    <span className="mb-2 grid size-10 place-items-center rounded-full bg-white/[0.04] text-ink-subtle ring-1 ring-line" aria-hidden="true">
+      {children}
+    </span>
+  )
+}
+
 /** Compact, quiet empty state: one line of text and, at most, one action. */
-export function EmptyState({ title, description, action, size = 'md' }: {
+export function EmptyState({ title, description, action, icon, size = 'md' }: {
   title: string
   description?: string
   action?: ReactNode
+  /** Optional decorative icon above the title. */
+  icon?: ReactNode
   size?: 'sm' | 'md'
 }) {
   return (
     <div className={`flex flex-col items-center gap-1 text-center ${size === 'sm' ? 'py-5' : 'py-10'}`}>
+      {icon ? <EmptyIcon>{icon}</EmptyIcon> : null}
       <p className="text-label font-medium text-ink">{title}</p>
       {description && <p className="max-w-sm text-label text-ink-subtle">{description}</p>}
       {action && <div className="mt-3">{action}</div>}
@@ -296,69 +340,14 @@ export function InlineError({ error, onRetry, inverse = false }: { error: unknow
 
 // --- Figures ---------------------------------------------------------------------
 
-/** Tiny column history (e.g. 6 months). Heights are presentation only; the last bar is emphasised. */
-export function MiniBars({ values, color, label, className = 'h-8', restOpacity = 0.28, lastOpacity = 1 }: {
-  values: number[]
-  color: string
-  label: string
-  className?: string
-  /** Opacity of the earlier bars and of the latest (emphasised) bar. */
-  restOpacity?: number
-  lastOpacity?: number
-}) {
-  const max = Math.max(...values, 0)
+/** A large amount with a quieter currency sign ("620 000 ₸"). Formatting only; true minus sign. */
+export function Figure({ cents, signed = false }: { cents: number; signed?: boolean }) {
+  const amount = (signed ? formatSignedKzt(cents) : formatKzt(cents).replace(/^-/, '−')).replace(/\s₸$/, '')
   return (
-    <div className={`flex items-end gap-[3px] ${className}`} role="img" aria-label={label}>
-      {values.map((v, i) => (
-        <span
-          key={i}
-          className="w-1.5 flex-1 rounded-[2px]"
-          style={{
-            height: `${max > 0 ? Math.max((v / max) * 100, 8) : 8}%`,
-            backgroundColor: color,
-            opacity: i === values.length - 1 ? lastOpacity : restOpacity,
-          }}
-        />
-      ))}
-    </div>
-  )
-}
-
-/**
- * Money in vs money out as one bar with a dot legend (widths are presentation only; the labelled
- * amounts come straight from the backend). `size="md"` is the thicker variant for hero modules.
- */
-export function SplitBar({ outCents, inCents, inverse = false, size = 'sm' }: {
-  outCents: number
-  inCents: number
-  inverse?: boolean
-  size?: 'sm' | 'md'
-}) {
-  const empty = outCents === 0 && inCents === 0
-  const track = inverse ? 'bg-black/20' : 'bg-white/[0.06]'
-  const label = inverse ? 'text-white/90' : 'text-ink-subtle'
-  const value = inverse ? 'text-white' : 'text-ink-muted'
-  return (
-    <div>
-      <div className={`flex gap-[2px] overflow-hidden rounded-[2px] ${size === 'md' ? 'h-2' : 'h-1.5'} ${track}`} aria-hidden="true">
-        {!empty && (
-          <>
-            {inCents > 0 && <span className="bg-income-chart" style={{ flexGrow: inCents }} />}
-            {outCents > 0 && <span className="bg-expense-chart" style={{ flexGrow: outCents }} />}
-          </>
-        )}
-      </div>
-      <div className={`mt-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs ${label}`}>
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className="size-2 shrink-0 rounded-[2px] bg-income-chart" aria-hidden="true" />
-          In <span className={`truncate font-medium tabular-nums ${value}`}>{formatKzt(inCents)}</span>
-        </span>
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className="size-2 shrink-0 rounded-[2px] bg-expense-chart" aria-hidden="true" />
-          Out <span className={`truncate font-medium tabular-nums ${value}`}>{formatKzt(outCents)}</span>
-        </span>
-      </div>
-    </div>
+    <span className="tabular-nums">
+      {amount}
+      <span className="ml-1 text-[0.6em] font-medium tracking-normal text-ink-subtle">₸</span>
+    </span>
   )
 }
 
@@ -366,7 +355,7 @@ export function SplitBar({ outCents, inCents, inverse = false, size = 'sm' }: {
 export function CategoryBadge({ name, color }: { name: string; color: string }) {
   return (
     <span className="inline-flex max-w-full items-center gap-2 text-label text-ink-muted">
-      <span className="size-2 shrink-0 rounded-[2px]" style={{ backgroundColor: color }} aria-hidden="true" />
+      <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} aria-hidden="true" />
       <span className="truncate">{name}</span>
     </span>
   )
@@ -387,7 +376,7 @@ export function Field({ id, label, error, hint, children }: {
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor={id} className="text-label font-medium text-ink">
+      <label htmlFor={id} className="text-label font-medium text-ink-muted">
         {label}
       </label>
       {children}
@@ -397,7 +386,8 @@ export function Field({ id, label, error, hint, children }: {
         </p>
       )}
       {error && (
-        <p id={`${id}-error`} className="text-xs font-medium text-danger">
+        <p id={`${id}-error`} className="flex items-start gap-1.5 text-xs font-medium text-danger">
+          <AlertIcon className="mt-px size-3.5 shrink-0" />
           {error}
         </p>
       )}

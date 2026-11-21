@@ -39,7 +39,7 @@ test.describe('Per-user isolation', () => {
     await expect(totals).not.toContainText(kzt('777 777'))
     await expect(totals).not.toContainText(kzt('1 000 000'))
 
-    await goTo(bob.page, 'Dashboard')
+    await goTo(bob.page, 'Overview')
     await expect(bob.page.getByRole('region', { name: 'Total balance' })).toContainText(kzt('0'))
     await expect(bob.page.getByRole('region', { name: 'Recent transactions' })).toContainText('No transactions yet')
 

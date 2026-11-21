@@ -127,6 +127,20 @@ export function formatDate(iso: string): string {
   return dayFormatter.format(fromIsoDate(iso))
 }
 
+const weekdayFormatter = new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
+
+/**
+ * A date close to `today` in a short form, for lists of recent transactions: "Today",
+ * "Yesterday", "Sun 15 Nov" within the same year, "20 Oct 2025" otherwise.
+ */
+export function formatRecentDate(iso: string, today: Date): string {
+  const date = fromIsoDate(iso)
+  const days = Math.round((startOfDay(today).getTime() - date.getTime()) / 86_400_000)
+  if (days === 0) return 'Today'
+  if (days === 1) return 'Yesterday'
+  return date.getFullYear() === today.getFullYear() ? weekdayFormatter.format(date).replace(',', '') : formatDate(iso)
+}
+
 /** "2026-10" → "Oct 2026" (or "Oct" with short=true) */
 export function formatMonth(yearMonth: string, short = false): string {
   const date = fromIsoDate(`${yearMonth}-01`)

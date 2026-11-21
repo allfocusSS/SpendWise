@@ -7,7 +7,8 @@ import App from './App.tsx'
 import { AppErrorFallback, ErrorBoundary } from './components/ErrorBoundary'
 import { createQueryClient } from './lib/queryClient'
 import { logError } from './lib/recovery'
-import '@fontsource-variable/inter'
+// The optical-size file of the same package: large figures get Inter's display cut automatically.
+import '@fontsource-variable/inter/opsz.css'
 import './index.css'
 
 const queryClient = createQueryClient()

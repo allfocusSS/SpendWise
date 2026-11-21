@@ -1,125 +1,122 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 
 import type { CategoryBreakdown } from '../api/client'
 import { formatKzt } from '../lib/money'
-import { labelClass } from '../lib/styles'
-import { ChartEmpty, LazyCategoryTreemap } from './LazyCharts'
+import { CategoryDonut } from './CategoryDonut'
+import { CategoryIcon } from './CategoryIcon'
+import { PieIcon, WalletIcon } from './icons'
+import { ChartEmpty } from './LazyCharts'
 
 type Item = CategoryBreakdown['items'][number]
 
-/**
- * Part-to-whole as one 100% stacked bar (categories in their own colours, hairline gaps).
- * A donut is avoided on purpose: with more than five categories slices become unreadable.
- * The text summary makes the same information available to screen readers.
- */
-export function ProportionBar({ items, className = 'h-2.5' }: { items: Item[]; className?: string }) {
-  const summary = items.map((item) => `${item.category_name} ${item.percentage}%`).join(', ')
+/** A rounded track with a fill; widths are presentation only (an amount over the largest amount). */
+function Bar({ value, largest, color, className }: { value: number; largest: number; color: string; className: string }) {
+  const width = largest > 0 ? Math.max((value / largest) * 100, 2) : 0
   return (
-    <div className={`flex gap-[2px] overflow-hidden rounded-[2px] bg-surface-sunken ${className}`} role="img" aria-label={`Share by category: ${summary}`}>
-      {items.map((item) => (
-        <span
-          key={item.category_id}
-          className="min-w-1"
-          style={{ flexGrow: item.total_cents, backgroundColor: item.color }}
-          title={`${item.category_name}: ${formatKzt(item.total_cents)} (${item.percentage}%)`}
-        />
-      ))}
+    <div className={`h-1.5 overflow-hidden rounded-full bg-surface-selected ${className}`} aria-hidden="true">
+      <span className="block h-full rounded-full" style={{ width: `${width}%`, backgroundColor: color }} />
     </div>
   )
 }
 
+/** Amount and the backend's share, right-aligned so the columns line up row to row. */
+function AmountAndShare({ item }: { item: Item }) {
+  return (
+    <>
+      <span className="ml-auto shrink-0 font-semibold text-ink tabular-nums">{formatKzt(item.total_cents)}</span>
+      <span className="w-[52px] shrink-0 text-right text-ink-subtle tabular-nums">{item.percentage}%</span>
+    </>
+  )
+}
+
 /**
- * Total, treemap (or a proportion bar in tight spots) and ranked list for one breakdown, or a
- * compact empty state. "wide" puts the treemap and the list side by side.
+ * Ranked rows (sorted by the backend, largest first): name, amount and share. Spending rows wear
+ * the category's colour (it links them to the donut); income rows share one colour, so their bars
+ * compare amounts and the icon and name carry identity.
  */
-export function CategorySplit({ breakdown, limit, layout = 'stacked', chart = 'treemap', treemapHeight = 'h-48', emptyAction }: {
+export function CategoryBreakdownList({ breakdown, active = null, onActive }: {
   breakdown: CategoryBreakdown
-  limit?: number
-  layout?: 'stacked' | 'wide'
-  chart?: 'treemap' | 'bar'
-  treemapHeight?: string
-  emptyAction?: ReactNode
+  /** The category being pointed at in the donut (by index), or null. */
+  active?: number | null
+  onActive?: (index: number | null) => void
 }) {
+  const largest = breakdown.items[0]?.total_cents ?? 0
+  if (breakdown.type === 'income') {
+    return (
+      <ul className="flex flex-col gap-3.5">
+        {breakdown.items.map((item) => (
+          <li key={item.category_id} className="py-1">
+            <p className="flex items-center gap-[9px] text-label text-ink-muted">
+              <CategoryIcon name={item.category_name} color={item.color} size="sm" />
+              <span className="min-w-0 truncate">{item.category_name}</span>
+              <AmountAndShare item={item} />
+            </p>
+            <Bar value={item.total_cents} largest={largest} color="var(--color-income-chart)" className="mt-2 mr-[61px] ml-[41px]" />
+          </li>
+        ))}
+      </ul>
+    )
+  }
+  return (
+    <ul className="flex flex-col gap-[11px]">
+      {breakdown.items.map((item, i) => (
+        <li
+          key={item.category_id}
+          onMouseEnter={onActive ? () => onActive(i) : undefined}
+          onMouseLeave={onActive ? () => onActive(null) : undefined}
+          className={`transition-opacity motion-reduce:transition-none ${active === null || active === i ? '' : 'opacity-45'}`}
+        >
+          <p className="flex items-center gap-[9px] text-label text-ink-muted">
+            <span className="size-[9px] shrink-0 rounded-full" style={{ backgroundColor: item.color }} aria-hidden="true" />
+            <span className="min-w-0 truncate">{item.category_name}</span>
+            <AmountAndShare item={item} />
+          </p>
+          <Bar value={item.total_cents} largest={largest} color={item.color} className="mt-1.5 mr-[61px] ml-[18px]" />
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** The donut's centre: the total and what it is. */
+export function DonutTotal({ cents, label }: { cents: number; label: string }) {
+  return (
+    <>
+      <span className="text-lg leading-tight font-semibold tracking-[-0.02em] text-ink tabular-nums">{formatKzt(cents)}</span>
+      <span className="text-xs text-ink-subtle">{label}</span>
+    </>
+  )
+}
+
+/** Spending: the donut beside the ranked list (stacked in a narrow card). */
+function SpendingSplit({ breakdown }: { breakdown: CategoryBreakdown }) {
+  const [active, setActive] = useState<number | null>(null)
+  return (
+    <div className="flex flex-wrap items-center gap-[26px]">
+      <CategoryDonut items={breakdown.items} total={breakdown.total_cents} active={active} onActive={setActive} size="size-[170px] max-lg:mx-auto">
+        <DonutTotal cents={breakdown.total_cents} label="spent" />
+      </CategoryDonut>
+      <div className="min-w-[220px] flex-1">
+        <CategoryBreakdownList breakdown={breakdown} active={active} onActive={setActive} />
+      </div>
+    </div>
+  )
+}
+
+/** One breakdown for a period: spending as a donut and ranked list, income as ranked bars, or an empty state. */
+export function CategorySplit({ breakdown, emptyAction }: { breakdown: CategoryBreakdown; emptyAction?: ReactNode }) {
   if (breakdown.items.length === 0) {
-    const what = breakdown.type === 'expense' ? 'spending' : 'income'
+    const spending = breakdown.type === 'expense'
     return (
       <ChartEmpty
-        title={`No ${what} in this period`}
-        description={`Categories appear here once ${breakdown.type === 'expense' ? 'expenses are' : 'income is'} recorded.`}
+        icon={spending ? <PieIcon className="size-5" /> : <WalletIcon className="size-5" />}
+        title={`No ${spending ? 'spending' : 'income'} in this period`}
+        description={spending ? 'Pick another period or add an expense.' : 'Pick another period or add income.'}
         action={emptyAction}
+        height="h-44"
       />
     )
   }
-  const header = (
-    <div className="flex items-end justify-between gap-3">
-      <div>
-        <p className={labelClass}>{breakdown.type === 'expense' ? 'Total spent' : 'Total earned'}</p>
-        <p className="mt-1.5 text-figure tabular-nums text-ink">{formatKzt(breakdown.total_cents)}</p>
-      </div>
-      <p className="text-xs text-ink-subtle tabular-nums">
-        {breakdown.items.length} {breakdown.items.length === 1 ? 'category' : 'categories'}
-      </p>
-    </div>
-  )
-  const visual = chart === 'treemap' ? <LazyCategoryTreemap breakdown={breakdown} height={treemapHeight} /> : <ProportionBar items={breakdown.items} />
-  const list = (
-    <>
-      <CategoryBreakdownList breakdown={breakdown} limit={limit} />
-      {limit !== undefined && breakdown.items.length > limit && (
-        <p className="mt-3 text-xs text-ink-subtle">and {breakdown.items.length - limit} more</p>
-      )}
-    </>
-  )
-  if (layout === 'wide') {
-    return (
-      <div className="flex flex-col gap-4">
-        {header}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
-          {visual}
-          <div>{list}</div>
-        </div>
-      </div>
-    )
-  }
-  return (
-    <div className="flex flex-col gap-4">
-      {header}
-      {visual}
-      <div>{list}</div>
-    </div>
-  )
-}
-
-/**
- * Ranked rows (sorted by the backend, largest first) with amount, share and a hairline bar in the
- * category's colour. Bar widths are presentation only; amounts and percentages come from the backend.
- */
-export function CategoryBreakdownList({ breakdown, limit }: { breakdown: CategoryBreakdown; limit?: number }) {
-  const items = limit ? breakdown.items.slice(0, limit) : breakdown.items
-  const largest = breakdown.items[0]?.total_cents ?? 0
-
-  return (
-    <ul className="grid gap-y-3">
-      {items.map((item) => {
-        const width = largest > 0 ? Math.max((item.total_cents / largest) * 100, 2) : 0
-        return (
-          <li key={item.category_id}>
-            <div className="flex items-baseline justify-between gap-3 text-label">
-              <span className="flex min-w-0 items-center gap-2">
-                <span className="size-2 shrink-0 rounded-[2px]" style={{ backgroundColor: item.color }} aria-hidden="true" />
-                <span className="truncate text-ink">{item.category_name}</span>
-              </span>
-              <span className="shrink-0 tabular-nums">
-                <span className="font-medium text-ink">{formatKzt(item.total_cents)}</span>
-                <span className="ml-2 inline-block w-12 text-right text-xs text-ink-subtle">{item.percentage}%</span>
-              </span>
-            </div>
-            <div className="mt-1.5 h-[3px] w-full bg-surface-sunken" aria-hidden="true">
-              <div className="h-[3px]" style={{ width: `${width}%`, backgroundColor: item.color }} />
-            </div>
-          </li>
-        )
-      })}
-    </ul>
-  )
+  if (breakdown.type === 'expense') return <SpendingSplit breakdown={breakdown} />
+  return <CategoryBreakdownList breakdown={breakdown} />
 }

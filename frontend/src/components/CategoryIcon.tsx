@@ -35,19 +35,19 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
 }
 
 const SIZES = {
-  sm: { box: 'size-7 rounded-md text-xs', icon: 'size-3.5' },
-  md: { box: 'size-8 rounded-lg text-xs', icon: 'size-4' },
-  lg: { box: 'size-10 rounded-lg text-sm', icon: 'size-5' },
+  sm: { box: 'size-8 text-xs', icon: 'size-3.5' },
+  md: { box: 'size-[38px] text-xs', icon: 'size-[17px]' },
+  lg: { box: 'size-11 text-sm', icon: 'size-5' },
 }
 
-/** Category mark: its icon (or initial) on a soft tint of the category colour. */
+/** Category mark: its icon (or initial) in a round tint of the category colour with a soft ring. */
 export function CategoryIcon({ name, color, size = 'md' }: { name: string; color: string; size?: keyof typeof SIZES }) {
   const Icon = ICONS[name.trim().toLowerCase()]
   const s = SIZES[size]
   return (
     <span
-      className={`grid shrink-0 place-items-center font-semibold ${s.box}`}
-      style={{ backgroundColor: tint(color, 14), color, boxShadow: `inset 0 0 0 1px ${tint(color, 28)}` }}
+      className={`grid shrink-0 place-items-center rounded-full font-semibold ${s.box}`}
+      style={{ backgroundColor: tint(color, 13), color, boxShadow: `inset 0 0 0 1.5px ${tint(color, 40)}` }}
       aria-hidden="true"
     >
       {Icon ? <Icon className={s.icon} strokeWidth={1.8} /> : name.trim().charAt(0).toUpperCase() || '?'}
