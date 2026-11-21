@@ -15,8 +15,8 @@ function NotFound() {
     <div className="mx-auto mt-10 max-w-md">
       <EmptyState
         title="Page not found"
-        description="The page you are looking for does not exist."
-        action={<Link to="/" className={linkClass}>Go to the dashboard</Link>}
+        description="There’s nothing at this address."
+        action={<Link to="/" className={linkClass}>Go to the overview</Link>}
       />
     </div>
   )

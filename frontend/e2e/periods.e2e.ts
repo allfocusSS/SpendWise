@@ -86,7 +86,7 @@ test.describe('Dashboard periods', () => {
     await addTransaction(page, { type: 'income', amount: '50 000', category: 'Salary', description: 'January pay', date: '2026-01-05' })
 
     // January: six months to January 2026 (July is outside the window).
-    await expect(cashFlow(page)).toContainText('Income, expenses and net · 6 months to Jan 2026')
+    await expect(cashFlow(page)).toContainText('6 months to Jan 2026')
     await expect(await chartMonths(page)).toHaveText(['Aug 2025', 'Sept 2025', 'Oct 2025', 'Nov 2025', 'Dec 2025', 'Jan 2026'])
     expect(trend.at(-1)).toEqual({ months: '6', until: '2026-01-01' })
 
@@ -95,18 +95,17 @@ test.describe('Dashboard periods', () => {
     await expect(monthSelector(page)).toContainText('December 2025')
     await expect(page.getByRole('region', { name: 'Money in, December 2025' })).toContainText(kzt('100 000'))
     await expect(page.getByRole('region', { name: 'Money out, December 2025' })).toContainText(kzt('30 000'))
-    await expect(page.getByRole('region', { name: 'Total balance' })).toContainText('Nov net')
-    await expect(cashFlow(page)).toContainText('Income, expenses and net · 6 months to Dec 2025')
+    await expect(page.getByRole('region', { name: 'Money in, December 2025' })).toContainText(/vs Nov ·/) // compared with the month before
+    await expect(cashFlow(page)).toContainText('6 months to Dec 2025')
     const months = await chartMonths(page)
     await expect(months).toHaveText(['Jul 2025', 'Aug 2025', 'Sept 2025', 'Oct 2025', 'Nov 2025', 'Dec 2025'])
     const december = cashFlow(page).getByRole('row', { name: /^Dec 2025/ })
     await expect(december.getByRole('cell')).toHaveText([kzt('100 000'), kzt('30 000'), kzt('70 000')])
     await expect(cashFlow(page).getByRole('row', { name: /^Jul 2025/ }).getByRole('cell').nth(1)).toHaveText(kzt('5 000'))
     expect(trend.at(-1)).toEqual({ months: '6', until: '2025-12-01' })
-    // The sparkline and the mini bars are labelled with the same window.
+    // The net bars and the cash-flow chart's text alternative name the same window.
     await expect(page.getByRole('img', { name: 'Monthly net, 6 months to Dec 2025' })).toBeVisible()
-    await expect(page.getByRole('img', { name: 'Money in, 6 months to Dec 2025' })).toBeVisible()
-    await expect(page.getByRole('img', { name: 'Money out, 6 months to Dec 2025' })).toBeVisible()
+    await expect(cashFlow(page)).toContainText('Income and expenses per month from Jul 2025 to Dec 2025')
     // The balance stays all-time and says so: 100 000 − 30 000 + 50 000 − 5 000.
     const balance = page.getByRole('region', { name: 'Total balance' })
     await expect(balance).toContainText('All time')
@@ -179,15 +178,16 @@ test.describe('Dashboard periods', () => {
 
     const previous = monthSelector(page).getByRole('button', { name: 'Previous month' })
     const next = monthSelector(page).getByRole('button', { name: 'Next month' })
+    // The account is new, so the month shows in the cash-flow window (its tiles come with data).
     await previous.click()
-    await expect(page.getByRole('region', { name: 'Money in, December 2025' })).toBeVisible()
+    await expect(cashFlow(page)).toContainText('6 months to Dec 2025')
     await expect.poll(() => countFor(trend, '2025-12-01')).toBe(1)
 
     // Back and forth within the cache's lifetime: no new requests, the right data each time.
     await next.click()
-    await expect(page.getByRole('region', { name: 'Money in, January 2026' })).toBeVisible()
+    await expect(cashFlow(page)).toContainText('6 months to Jan 2026')
     await previous.click()
-    await expect(page.getByRole('region', { name: 'Money in, December 2025' })).toBeVisible()
+    await expect(cashFlow(page)).toContainText('6 months to Dec 2025')
     expect(countFor(trend, '2026-01-01')).toBe(1)
     expect(countFor(trend, '2025-12-01')).toBe(1)
 
@@ -231,7 +231,7 @@ test.describe('Analytics periods', () => {
     for (const title of ['Cash flow', 'Net by month']) {
       const card = page.getByRole('region', { name: title })
       await expect(card).toContainText(spaced('Last 12 months · Jun 2025 – May 2026'))
-      await expect(card).toContainText('Not affected by the period selected above.')
+      await expect(card).toContainText('The period above doesn’t change this chart.')
     }
     await expect(await chartMonths(page)).toHaveCount(12)
     await expect((await chartMonths(page)).first()).toHaveText('Jun 2025')

@@ -1,15 +1,15 @@
 import { useState } from 'react'
 
-import type { MonthlyTrend, Summary } from '../api/client'
+import type { CategoryBreakdown, MonthlyTrend, Summary } from '../api/client'
 import { useCategoryBreakdown, useMonthlyTrend, useSummary } from '../api/queries'
 import { CategorySplit } from '../components/CategoryBreakdownList'
-import { ChartEmpty, ChartLegend, ChartSkeleton, LazyCashFlowChart, LazyNetBarsChart } from '../components/LazyCharts'
+import { ChartEmpty, ChartLegend, LazyCashFlowChart, LazyNetBarsChart, TrendQueryBody, type TrendQuery } from '../components/LazyCharts'
 import { SummaryTiles } from '../components/SummaryTiles'
 import { Card, ErrorState, PageHeader, Segmented, Skeleton, SkeletonRows } from '../components/ui'
 import { SERIES } from '../lib/chartColors'
-import { formatDateRange, formatMonthSpan, PERIODS, periodRange, trendWindow, type DateRange, type PeriodKey } from '../lib/dates'
-import { formatKzt } from '../lib/money'
-import { cardClass, labelClass, inputClass } from '../lib/styles'
+import { formatDateRange, formatMonthSpan, fromMonthKey, PERIODS, periodRange, trendWindow, type DateRange, type PeriodKey } from '../lib/dates'
+import { formatKzt, formatSignedKzt } from '../lib/money'
+import { cardClass, inputClass, labelClass } from '../lib/styles'
 import { transactionCount } from '../lib/text'
 import { useToday } from '../lib/useToday'
 
@@ -23,6 +23,11 @@ const PERIOD_OPTIONS: { value: Selection; label: string }[] = [
 /** The cash-flow and net charts: always the last 12 months, whatever period is selected. */
 const TREND_MONTHS = 12
 
+/** Months listed one by one in "Income vs expenses" (longer periods have the net chart). */
+const LISTED_MONTHS = 6
+
+type BreakdownQuery = { data?: CategoryBreakdown; isPending: boolean; isError: boolean; error: unknown; refetch: () => unknown }
+
 /**
  * What the figures cover, with the exact dates sent to the API: "This month · 1–30 Nov 2026",
  * "1 Mar – 30 Apr 2026", "From 1 Mar 2026", or "All time" (also for a custom range without dates,
@@ -32,6 +37,17 @@ function periodLabelFor(selection: Selection, range: DateRange): string {
   if (selection === 'custom' || selection === 'all-time') return formatDateRange(range)
   const name = PERIOD_OPTIONS.find((option) => option.value === selection)?.label ?? ''
   return `${name} · ${formatDateRange(range)}`
+}
+
+/** The period's months that fall in the chart's window ("YYYY-MM", first and last), if any. */
+function bandFor(range: DateRange, trend: MonthlyTrend | undefined): [string, string] | undefined {
+  const months = trend?.months.map((m) => m.month) ?? []
+  if (months.length === 0 || (!range.date_from && !range.date_to)) return undefined
+  const first = range.date_from?.slice(0, 7) ?? months[0]
+  const last = range.date_to?.slice(0, 7) ?? months[months.length - 1]
+  const from = first > months[0] ? first : months[0]
+  const to = last < months[months.length - 1] ? last : months[months.length - 1]
+  return from <= to ? [from, to] : undefined
 }
 
 export function AnalyticsPage() {
@@ -46,17 +62,21 @@ export function AnalyticsPage() {
       ? { date_from: custom.date_from || undefined, date_to: custom.date_to || undefined }
       : periodRange(selection, today)
   const periodLabel = periodLabelFor(selection, range)
+  const periodName = selection === 'custom' ? formatDateRange(range) : PERIOD_OPTIONS.find((option) => option.value === selection)?.label ?? ''
+  // Both charts ask for the same 12 months, so they share one request; `until` keeps the window on
+  // the browser's month, not the server's UTC one.
+  const trend = useMonthlyTrend(trendWindow(today, TREND_MONTHS))
 
   return (
     <>
       <PageHeader
         title="Analytics"
-        description="Where your money comes from and where it goes. Every figure is calculated by the server."
+        description="Where your money came from and where it went, for any period."
         action={<Segmented label="Period" options={PERIOD_OPTIONS} value={selection} onChange={setSelection} />}
       />
 
       {selection === 'custom' && (
-        <div className={`${cardClass} mb-4 flex flex-col gap-3 p-4 sm:flex-row sm:items-end`}>
+        <div className={`${cardClass} mb-3.5 flex flex-col gap-3 p-4 sm:flex-row sm:items-end lg:mb-[18px]`}>
           <div className="flex flex-col gap-1.5">
             <label htmlFor="a-from" className={labelClass}>From</label>
             <input id="a-from" type="date" value={custom.date_from} aria-invalid={invalidCustom}
@@ -67,69 +87,74 @@ export function AnalyticsPage() {
             <input id="a-to" type="date" value={custom.date_to} aria-invalid={invalidCustom}
               onChange={(e) => setCustom({ ...custom, date_to: e.target.value })} className={inputClass(invalidCustom)} />
           </div>
-          {invalidCustom && <p role="alert" className="text-xs font-medium text-expense sm:pb-2.5">“From” must be on or before “To”.</p>}
+          {invalidCustom && <p role="alert" className="text-xs font-medium text-danger sm:pb-3">“From” must be on or before “To”.</p>}
         </div>
       )}
 
       {invalidCustom ? (
-        <TrendSection today={today} />
+        <CashFlowCard trend={trend} />
       ) : (
-        <PeriodAnalytics range={range} periodLabel={periodLabel} today={today} />
+        <PeriodAnalytics range={range} periodLabel={periodLabel} periodName={periodName} trend={trend} />
       )}
     </>
   )
 }
 
-function PeriodAnalytics({ range, periodLabel, today }: { range: DateRange; periodLabel: string; today: Date }) {
+function PeriodAnalytics({ range, periodLabel, periodName, trend }: {
+  range: DateRange
+  /** "This month · 1–30 Nov 2026" */
+  periodLabel: string
+  /** "This month" */
+  periodName: string
+  trend: TrendQuery
+}) {
   const summary = useSummary(range)
   const expenses = useCategoryBreakdown({ type: 'expense', ...range })
   const income = useCategoryBreakdown({ type: 'income', ...range })
+  const categories = (query: BreakdownQuery, kind: string) => {
+    const n = query.data?.items.length
+    return n === undefined ? null : `${n} ${kind} ${n === 1 ? 'category' : 'categories'}`
+  }
 
   return (
-    <div className="flex flex-col gap-4">
-      <SummaryTiles query={summary} period={periodLabel} />
+    <div className="flex flex-col gap-3.5 lg:gap-[18px]">
+      <SummaryTiles
+        query={summary}
+        period={periodLabel}
+        notes={{
+          net: 'Money in minus money out',
+          income: categories(income, 'income'),
+          expense: categories(expenses, 'expense'),
+          count: formatDateRange(range),
+        }}
+      />
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
-        <div className="xl:col-span-8">
-          <TrendSection today={today} />
-        </div>
-        <Comparison query={summary} periodLabel={periodLabel} />
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 lg:gap-[18px] xl:grid-cols-4">
+        <CashFlowCard trend={trend} band={bandFor(range, trend.data)} className="lg:col-span-2 xl:col-span-3" />
+        <Comparison query={summary} trend={trend} band={bandFor(range, trend.data)} />
+        <BreakdownCard title="Spending by category" query={expenses} meta={periodName} className="xl:col-span-2" />
+        <BreakdownCard title="Income by category" query={income} />
+        <NetCard trend={trend} />
       </div>
-
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
-        {(
-          [
-            ['Spending by category', expenses, 'xl:col-span-7', 'wide'],
-            ['Income by category', income, 'xl:col-span-5', 'stacked'],
-          ] as const
-        ).map(([title, query, span, layout]) => (
-          <Card key={title} title={title} subtitle={periodLabel} className={span}>
-            {query.isError ? (
-              <ErrorState error={query.error} onRetry={() => query.refetch()} />
-            ) : query.isPending ? (
-              <div role="status" aria-label={`Loading ${title.toLowerCase()}`} className="flex flex-col gap-4">
-                <Skeleton className="h-6 w-32" />
-                <Skeleton className="h-2.5 w-full" />
-                <SkeletonRows rows={3} label={`Loading ${title.toLowerCase()}`} />
-              </div>
-            ) : (
-              <CategorySplit breakdown={query.data} layout={layout} limit={layout === 'stacked' ? 5 : undefined} treemapHeight={layout === 'wide' ? 'h-60' : 'h-48'} />
-            )}
-          </Card>
-        ))}
-      </div>
-
-      <NetSection today={today} />
     </div>
   )
 }
 
-/**
- * The last 12 months to the browser's current month. Both charts ask for the same window, so they
- * share one request; `until` keeps it on the local month, not the server's UTC one.
- */
-function useRollingTrend(today: Date) {
-  return useMonthlyTrend(trendWindow(today, TREND_MONTHS))
+function BreakdownCard({ title, query, meta, className = '' }: { title: string; query: BreakdownQuery; meta?: string; className?: string }) {
+  return (
+    <Card title={title} action={meta ? <span>{meta}</span> : undefined} className={className}>
+      {query.isError ? (
+        <ErrorState error={query.error} onRetry={() => query.refetch()} />
+      ) : query.isPending || !query.data ? (
+        <div role="status" aria-label={`Loading ${title.toLowerCase()}`} className="flex flex-col gap-4">
+          <Skeleton className="h-6 w-32" />
+          <SkeletonRows rows={3} label={`Loading ${title.toLowerCase()}`} />
+        </div>
+      ) : (
+        <CategorySplit breakdown={query.data} />
+      )}
+    </Card>
+  )
 }
 
 /** "Last 12 months · Dec 2025 – Nov 2026", from the months the server actually returned. */
@@ -139,48 +164,51 @@ function windowLabel(trend: MonthlyTrend | undefined): string {
   return `Last ${TREND_MONTHS} months${span}`
 }
 
-/** Says, under a rolling chart, that the period picker above doesn't apply to it. */
-function RollingNote() {
-  return <p className="mb-2 text-xs text-ink-subtle">Not affected by the period selected above.</p>
-}
+/** Says, beside a rolling chart, that the period picker above doesn't apply to it. */
+const rollingNote = <p className="text-xs text-ink-subtle">The period above doesn’t change this chart.</p>
 
-/** Hero chart: 12 months of income and expenses with the net line. */
-function TrendSection({ today }: { today: Date }) {
-  const trend = useRollingTrend(today)
+/** The hero chart: 12 months of income and expenses, the selected period shaded. */
+function CashFlowCard({ trend, band, className = '' }: { trend: TrendQuery; band?: [string, string]; className?: string }) {
   return (
-    <Card title="Cash flow" subtitle={windowLabel(trend.data)} action={<ChartLegend net />} className="h-full">
-      <RollingNote />
-      {trend.isError ? (
-        <ErrorState error={trend.error} onRetry={() => trend.refetch()} />
-      ) : trend.isPending ? (
-        <ChartSkeleton height="h-72" />
-      ) : (
-        <LazyCashFlowChart trend={trend.data} height="h-72" showNet />
-      )}
+    <Card
+      title="Cash flow"
+      subtitle={windowLabel(trend.data)}
+      action={
+        <>
+          <ChartLegend />
+          {band ? <span>Shaded months are your period</span> : null}
+        </>
+      }
+      className={className}
+    >
+      <TrendQueryBody trend={trend} height="h-[250px]">
+        {(data) => <LazyCashFlowChart trend={data} height="h-[250px]" band={band} summary={rollingNote} />}
+      </TrendQueryBody>
     </Card>
   )
 }
 
-function NetSection({ today }: { today: Date }) {
-  const trend = useRollingTrend(today)
+function NetCard({ trend }: { trend: TrendQuery }) {
+  const label = windowLabel(trend.data)
   return (
-    <Card title="Net by month" subtitle={windowLabel(trend.data)}>
-      <RollingNote />
-      {trend.isError ? (
-        <ErrorState error={trend.error} onRetry={() => trend.refetch()} />
-      ) : trend.isPending ? (
-        <ChartSkeleton height="h-52" />
-      ) : (
-        <LazyNetBarsChart trend={trend.data} />
-      )}
+    <Card title="Net by month" subtitle={label}>
+      <div className="-mt-1 mb-1.5"><ChartLegend kind="net" /></div>
+      <TrendQueryBody trend={trend} height="h-[170px]">
+        {(data) => <LazyNetBarsChart trend={data} label={`Monthly net, ${label}`} height="h-[170px]" shortLabels />}
+      </TrendQueryBody>
+      <div className="mt-2">{rollingNote}</div>
     </Card>
   )
 }
 
-/** Income vs expenses for the period as two proportional bars (widths are presentation only). */
-function Comparison({ query, periodLabel }: {
+/**
+ * Income against expenses for the period as two bars (widths are presentation only), each month's
+ * net when the period is a few months inside the chart's window, and the period's net change.
+ */
+function Comparison({ query, trend, band }: {
   query: { data?: Summary; isPending: boolean; isError: boolean; error: unknown; refetch: () => unknown }
-  periodLabel: string
+  trend: TrendQuery
+  band?: [string, string]
 }) {
   const data = query.data
   const largest = data ? Math.max(data.total_income_cents, data.total_expense_cents) : 0
@@ -190,50 +218,58 @@ function Comparison({ query, periodLabel }: {
         { label: 'Expenses', value: data.total_expense_cents, color: SERIES.expense },
       ]
     : []
+  const months = band ? (trend.data?.months ?? []).filter((m) => m.month >= band[0] && m.month <= band[1]) : []
+  const listMonths = months.length > 1 && months.length <= LISTED_MONTHS
   return (
-    <Card title="Income vs expenses" subtitle={periodLabel} className="xl:col-span-4">
+    <Card title="Income vs expenses">
       {query.isError ? (
         <ErrorState error={query.error} onRetry={() => query.refetch()} />
       ) : query.isPending || !data ? (
-        <div role="status" aria-label="Loading comparison" className="flex flex-col gap-5 pt-2">
+        <div role="status" aria-label="Loading comparison" className="flex flex-col gap-5 pt-1">
           <Skeleton className="h-10 w-full" />
           <Skeleton className="h-10 w-full" />
         </div>
       ) : data.transaction_count === 0 ? (
         <ChartEmpty height="h-56" title="Nothing to compare yet" description="No transactions in this period." />
       ) : (
-        <div className="flex h-full flex-col">
-          <ul className="flex flex-col gap-5 pt-2">
+        <div className="flex h-full flex-col gap-4">
+          <ul className="flex flex-col gap-4">
             {rows.map((row) => (
               <li key={row.label}>
-                <div className="flex items-baseline justify-between gap-3">
-                  <span className={`${labelClass} flex items-center gap-2`}>
-                    <span className="size-2 rounded-[2px]" style={{ backgroundColor: row.color }} aria-hidden="true" />
-                    {row.label}
-                  </span>
-                  <span className="text-xl font-semibold tracking-tight tabular-nums text-ink">{formatKzt(row.value)}</span>
-                </div>
-                <div className="mt-2 h-3 w-full rounded-sm bg-ink/[0.05]" aria-hidden="true">
-                  <div
-                    className="h-3 rounded-sm"
+                <p className="mb-[7px] flex items-baseline justify-between gap-3 text-label text-ink-muted">
+                  {row.label}
+                  <span className="font-semibold text-ink tabular-nums">{formatKzt(row.value)}</span>
+                </p>
+                <div className="h-2.5 overflow-hidden rounded-full bg-surface-selected" aria-hidden="true">
+                  <span
+                    className="block h-full rounded-full"
                     style={{ width: `${largest > 0 && row.value > 0 ? Math.max((row.value / largest) * 100, 1.5) : 0}%`, backgroundColor: row.color }}
                   />
                 </div>
               </li>
             ))}
           </ul>
-          <dl className="mt-auto grid grid-cols-2 gap-4 border-t border-line pt-4">
-            <div>
-              <dt className={labelClass}>Net</dt>
-              <dd className={`mt-1 text-lg font-semibold tabular-nums ${data.balance_cents < 0 ? 'text-expense' : 'text-ink'}`}>
-                {formatKzt(data.balance_cents)}
-              </dd>
+          {listMonths ? (
+            <div className="border-t border-line pt-3">
+              <p className="mb-1 text-xs text-ink-subtle">Net by month in this period</p>
+              <dl>
+                {months.map((m) => (
+                  <div key={m.month} className="flex justify-between gap-3 py-[5px] text-label text-ink-muted">
+                    <dt>{fromMonthKey(m.month).toLocaleDateString('en-GB', { month: 'long' })}</dt>
+                    <dd className={`font-semibold tabular-nums ${m.net_cents > 0 ? 'text-income' : m.net_cents < 0 ? 'text-expense' : 'text-ink'}`}>
+                      {formatSignedKzt(m.net_cents)}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
             </div>
-            <div>
-              <dt className={labelClass}>Activity</dt>
-              <dd className="mt-1 text-lg font-semibold tabular-nums text-ink">{transactionCount(data.transaction_count)}</dd>
-            </div>
-          </dl>
+          ) : null}
+          <div className="mt-auto border-t border-line pt-3.5">
+            <p className="text-xs text-ink-subtle">Net change · {transactionCount(data.transaction_count)}</p>
+            <p className={`mt-1 text-figure tabular-nums ${data.balance_cents > 0 ? 'text-income' : data.balance_cents < 0 ? 'text-expense' : 'text-ink'}`}>
+              {formatSignedKzt(data.balance_cents)}
+            </p>
+          </div>
         </div>
       )}
     </Card>

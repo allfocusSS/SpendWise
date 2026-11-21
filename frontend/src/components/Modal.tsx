@@ -39,18 +39,19 @@ export function Modal({ open, title, onClose, children, size = 'md' }: {
       }}
       className={
         size === 'sheet'
-          ? 'mx-0 mt-auto mb-0 max-h-[92dvh] w-full max-w-none rounded-t-[var(--radius-card)] border-t border-line-strong bg-surface p-0 text-ink shadow-pop backdrop:bg-black/60 sm:my-0 sm:mr-0 sm:ml-auto sm:h-dvh sm:max-h-none sm:w-[480px] sm:rounded-none sm:border-t-0 sm:border-l'
-          : `m-auto w-[calc(100%-2rem)] rounded-[var(--radius-card)] border border-line-strong bg-surface p-0 text-ink shadow-pop backdrop:bg-black/60 ${size === 'lg' ? 'max-w-xl' : 'max-w-md'}`
+          ? 'mx-0 mt-auto mb-0 max-h-[92dvh] w-full max-w-none rounded-t-[22px] border-t border-line-strong bg-surface p-0 text-ink shadow-pop backdrop:bg-[#0a0716]/75 sm:my-4 sm:mr-4 sm:ml-auto sm:h-[calc(100dvh-2rem)] sm:max-h-none sm:w-[500px] sm:rounded-[18px] sm:border'
+          : `m-auto w-[calc(100%-2rem)] rounded-[18px] border border-line-strong bg-surface p-0 text-ink shadow-pop backdrop:bg-[#0a0716]/75 ${size === 'lg' ? 'max-w-xl' : 'max-w-md'}`
       }
     >
       {open &&
         (size === 'sheet' ? (
           <div className="flex h-full max-h-[92dvh] flex-col sm:max-h-none">
+            <div className="mx-auto mt-2.5 h-[5px] w-10 shrink-0 rounded-full bg-line-strong sm:hidden" aria-hidden="true" />
             <div className="flex items-center justify-between gap-4 border-b border-line px-5 py-4 sm:px-6">
               <h2 id={titleId} className="text-xl font-semibold tracking-tight text-ink">
                 {title}
               </h2>
-              <IconButton label="Close dialog" onClick={onClose} className="-mr-1.5 size-8">
+              <IconButton label="Close dialog" onClick={onClose} className="-mr-1 size-10">
                 <CloseIcon />
               </IconButton>
             </div>
@@ -62,7 +63,7 @@ export function Modal({ open, title, onClose, children, size = 'md' }: {
               <h2 id={titleId} className="text-xl font-semibold tracking-tight text-ink">
                 {title}
               </h2>
-              <IconButton label="Close dialog" onClick={onClose} className="-mt-0.5 -mr-1.5 size-8">
+              <IconButton label="Close dialog" onClick={onClose} className="-mt-1 -mr-1 size-10">
                 <CloseIcon />
               </IconButton>
             </div>

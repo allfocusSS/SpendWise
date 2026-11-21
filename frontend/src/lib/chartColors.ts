@@ -1,32 +1,21 @@
 /**
- * Chart series colours for the Graphite (dark) theme: emerald income, coral expenses, blue net.
- * Checked with the palette validator on the #12151c surface, all pairs: lightness band, chroma,
- * CVD ΔE ≥ 9.0, normal-vision ΔE ≥ 23.5, all ≥ 3:1 contrast. Charts still keep legends,
- * tooltips and table views. Text amounts use the lighter --color-income / --color-expense tokens.
+ * Chart colours for the Plum theme: violet income and pink-magenta expenses (the reference's
+ * violet/magenta, with the expense hue moved towards pink so the pair stays distinct for colour
+ * blindness: palette validator CVD ΔE 17.6, normal vision 22.5, both ≥ 4.5:1 on the #1e1938 card).
+ * Charts keep legends, tooltips and table views; amounts in text use the emerald and rose tokens.
+ * The neutrals below mirror index.css.
  */
 export const SERIES = {
-  income: '#12a07a',
-  expense: '#ec5f53',
-  net: '#6a7ff0',
+  income: '#8a72ff',
+  expense: '#e04f8c',
+  net: '#c4b5fd',
 } as const
 
-export const GRID = '#1f2430' // hairline, recessive
-export const AXIS = '#323949' // baseline (line-strong token)
-export const AXIS_TEXT = '#8892a4' // ink-subtle token, 5.8:1 on the surface
-export const CURSOR = 'rgba(255, 255, 255, 0.03)'
-export const SURFACE = '#12151c'
-
-/** Label colours for text drawn on a category-coloured tile. */
-export const ON_LIGHT = '#0a0c10'
-export const ON_DARK = '#ffffff'
-
-/** Pick the label colour with more contrast against a "#rrggbb" fill (WCAG relative luminance). */
-export function labelOn(fill: string): string {
-  const [r, g, b] = [1, 3, 5].map((i) => {
-    const c = parseInt(fill.slice(i, i + 2), 16) / 255
-    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
-  })
-  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-  // Contrast with black is (L + 0.05) / 0.05, with white 1.05 / (L + 0.05); pick the larger.
-  return (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) ? ON_LIGHT : ON_DARK
-}
+export const GRID = 'rgba(196, 189, 220, 0.14)' // dashed, recessive
+export const AXIS = '#3d3566' // baseline (line-strong token)
+export const AXIS_TEXT = '#a39bc4' // ink-subtle token, 6.4:1 on the card
+export const CURSOR = 'rgba(185, 165, 255, 0.06)'
+export const SURFACE = '#1e1938'
+export const INK = '#f5f3fb' // ink token, for an emphasised axis label
+export const HIGHLIGHT = 'rgba(185, 165, 255, 0.08)' // band behind the month or period the page is showing
+export const REST = '#6b6390' // categories a chart doesn't name (≥ 3:1 on the card)
