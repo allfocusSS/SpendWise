@@ -1,12 +1,14 @@
-import { useState, type FormEvent } from 'react'
+import { useState, type FormEvent, type ReactNode } from 'react'
 
 import { ApiError, type Category, type CategoryBreakdown, type TransactionType } from '../api/client'
 import { useCategories, useCategoryBreakdown, useCreateCategory, useDeleteCategory, useUpdateCategory } from '../api/queries'
+import { ShareRing } from '../components/CategoryDonut'
+import { CategoryIcon } from '../components/CategoryIcon'
 import { ChevronDownIcon, PencilIcon, PlusIcon, TrashIcon } from '../components/icons'
-import { LazyCategoryTreemap } from '../components/LazyCharts'
 import { ConfirmDialog, Modal } from '../components/Modal'
 import {
   Button,
+  Card,
   EmptyState,
   ErrorState,
   Field,
@@ -15,12 +17,16 @@ import {
   PageHeader,
   SearchInput,
   Segmented,
+  Select,
   Skeleton,
   SkeletonRows,
 } from '../components/ui'
 import { periodRange } from '../lib/dates'
 import { formatKzt } from '../lib/money'
-import { cardClass, describedBy, labelClass, flushTh, inputClass, table } from '../lib/styles'
+import { cardClass, describedBy, flushTh, inputClass, table } from '../lib/styles'
+import { transactionCount } from '../lib/text'
+import { useToast } from '../lib/toast'
+import { useToday } from '../lib/useToday'
 
 const DEFAULT_COLOR = '#64748b'
 
@@ -30,7 +36,12 @@ const PERIOD_OPTIONS: { value: Period; label: string }[] = [
   { value: 'all-time', label: 'All time' },
 ]
 
+type BreakdownQuery = { data?: CategoryBreakdown; isPending: boolean; isError: boolean; error: unknown; refetch: () => unknown }
+type Item = CategoryBreakdown['items'][number]
+
 export function CategoriesPage() {
+  const toast = useToast()
+  const today = useToday()
   const categories = useCategories()
   const [period, setPeriod] = useState<Period>('this-month')
   const [search, setSearch] = useState('')
@@ -39,7 +50,7 @@ export function CategoriesPage() {
   const [deleting, setDeleting] = useState<Category | null>(null)
   const remove = useDeleteCategory()
 
-  const range = periodRange(period)
+  const range = periodRange(period, today)
   const expenses = useCategoryBreakdown({ type: 'expense', ...range })
   const income = useCategoryBreakdown({ type: 'income', ...range })
 
@@ -56,47 +67,30 @@ export function CategoriesPage() {
     expense: categories.data?.filter((c) => c.type === 'expense').length ?? 0,
     income: categories.data?.filter((c) => c.type === 'income').length ?? 0,
   }
-  const periodLabel = PERIOD_OPTIONS.find((o) => o.value === period)?.label ?? ''
+  // "November", or "All time": what the figures on this page cover.
+  const periodName = period === 'this-month' ? today.toLocaleDateString('en-GB', { month: 'long' }) : 'All time'
+  const ledgerProps = { searching: term !== '', periodName, onEdit: setEditing, onDelete: setDeleting }
 
   return (
     <>
       <PageHeader
         title="Categories"
-        description="How your money is grouped, with activity for the selected period."
+        description="How much went through each category this month or in total."
         action={
-          <>
-            <Segmented label="Period" options={PERIOD_OPTIONS} value={period} onChange={setPeriod} />
-            <Button onClick={() => setAdding('expense')}>
-              <PlusIcon strokeWidth={2} /> Add category
+          <div className="flex w-full items-center gap-2.5 lg:w-auto">
+            <Segmented label="Period" options={PERIOD_OPTIONS} value={period} onChange={setPeriod} className="max-lg:grid max-lg:flex-1 max-lg:grid-cols-2" />
+            <Button variant="secondary" onClick={() => setAdding('expense')} className="pointer-coarse:h-11">
+              <PlusIcon strokeWidth={2.2} />
+              <span>Add<span className="max-sm:sr-only"> category</span></span>
             </Button>
-          </>
+          </div>
         }
       />
-
-      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-label text-ink-subtle tabular-nums">
-          <span className="font-semibold text-ink">{counts.all}</span> categories · {counts.expense} expense · {counts.income} income
-        </p>
-        <SearchInput label="Search categories" value={search} onChange={setSearch} placeholder="Search categories…" className="sm:w-64" />
-      </div>
-
-      {expenses.data && expenses.data.items.length > 0 && (
-        <section className={`${cardClass} mb-4 p-5`} aria-labelledby="spending-map">
-          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <h2 id="spending-map" className={labelClass}>Spending · {periodLabel}</h2>
-              <p className="mt-1 text-figure tabular-nums text-ink">{formatKzt(expenses.data.total_cents)}</p>
-            </div>
-            <p className="text-xs text-ink-subtle">Tile size shows each category’s share</p>
-          </div>
-          <LazyCategoryTreemap breakdown={expenses.data} height="h-44" />
-        </section>
-      )}
 
       {categories.isError ? (
         <div className={`${cardClass} p-4`}><ErrorState error={categories.error} onRetry={() => categories.refetch()} /></div>
       ) : categories.isPending ? (
-        <div className={`${cardClass} px-4`}><SkeletonRows rows={6} label="Loading categories" /></div>
+        <div className={`${cardClass} p-4`}><SkeletonRows rows={6} label="Loading categories" /></div>
       ) : counts.all === 0 ? (
         <div className={cardClass}>
           <EmptyState
@@ -106,20 +100,42 @@ export function CategoriesPage() {
           />
         </div>
       ) : (
-        <div className="flex flex-col gap-4">
-          {(['expense', 'income'] as const).map((type) => (
-            <CategoryLedger
-              key={type}
-              type={type}
-              categories={matching.filter((c) => c.type === type)}
-              breakdown={type === 'expense' ? expenses : income}
-              periodLabel={periodLabel}
-              searching={term !== ''}
-              onAdd={() => setAdding(type)}
-              onEdit={setEditing}
-              onDelete={setDeleting}
-            />
-          ))}
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3 lg:gap-[18px]">
+          <Card title={period === 'this-month' ? `${periodName} so far` : 'All time'} className="lg:col-start-3 lg:row-start-1">
+            <dl className="text-[13.5px] text-ink-muted">
+              <GlanceRow label="Spent" query={expenses} />
+              <GlanceRow label="Earned" query={income} className="text-income" />
+              <div className="flex items-baseline justify-between gap-3 border-t border-line py-2.5">
+                <dt>Categories</dt>
+                <dd className="tabular-nums">
+                  <span className="text-[15px] font-semibold text-ink">{counts.all}</span>
+                  <span className="text-[12.5px] text-ink-subtle"> · {counts.expense} expense · {counts.income} income</span>
+                </dd>
+              </div>
+            </dl>
+            <SearchInput label="Search categories" value={search} onChange={setSearch} placeholder="Search categories" className="mt-3" />
+          </Card>
+
+          <Card
+            title="Spending distribution"
+            action={<span>{period === 'this-month' ? `Share of ${periodName} spending` : 'Share of all spending'}</span>}
+            className="lg:col-span-2 lg:col-start-1 lg:row-start-1"
+          >
+            <Distribution query={expenses} />
+          </Card>
+
+          <ExpenseLedger
+            categories={matching.filter((c) => c.type === 'expense')}
+            breakdown={expenses}
+            className="lg:col-span-2"
+            {...ledgerProps}
+          />
+          <IncomeLedger
+            categories={matching.filter((c) => c.type === 'income')}
+            breakdown={income}
+            onAdd={() => setAdding('income')}
+            {...ledgerProps}
+          />
         </div>
       )}
 
@@ -145,128 +161,185 @@ export function CategoriesPage() {
         confirmLabel="Delete"
         pending={remove.isPending}
         error={remove.error?.message}
-        onConfirm={() => deleting && remove.mutate(deleting.id, { onSuccess: closeDelete })}
+        onConfirm={() =>
+          deleting &&
+          remove.mutate(deleting.id, {
+            onSuccess: () => {
+              closeDelete()
+              toast('Category deleted')
+            },
+          })
+        }
         onClose={closeDelete}
       />
     </>
   )
 }
 
-type BreakdownQuery = { data?: CategoryBreakdown; isPending: boolean; isError: boolean; error: unknown; refetch: () => unknown }
+/** A period total from the breakdown (the backend's), or its loading / error state. */
+function GlanceRow({ label, query, className = 'text-ink' }: { label: string; query: BreakdownQuery; className?: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 border-t border-line py-2.5">
+      <dt>{label}</dt>
+      <dd className={`text-[15px] font-semibold tabular-nums ${className}`}>
+        {query.isError ? <span className="text-ink-subtle">—</span> : query.data ? formatKzt(query.data.total_cents) : <Skeleton className="h-4 w-24" />}
+      </dd>
+    </div>
+  )
+}
 
-/** One ledger per type: each category with its backend total, share and count for the period. */
-function CategoryLedger({ type, categories, breakdown, periodLabel, searching, onAdd, onEdit, onDelete }: {
-  type: TransactionType
-  categories: Category[]
-  breakdown: BreakdownQuery
-  periodLabel: string
-  searching: boolean
-  onAdd: () => void
-  onEdit: (category: Category) => void
-  onDelete: (category: Category) => void
-}) {
-  const income = type === 'income'
-  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'amount', dir: 'desc' })
-  const byId = new Map((breakdown.data?.items ?? []).map((item) => [item.category_id, item]))
-  // The full category list is loaded, so sorting here covers every row (ordering only, no maths).
+/** Every category with spending in the period as a ring of its share (the backend's percentage). */
+function Distribution({ query }: { query: BreakdownQuery }) {
+  if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
+  if (query.isPending || !query.data) {
+    return (
+      <div role="status" aria-label="Loading spending" className="grid grid-cols-3 gap-2 xl:grid-cols-6">
+        {Array.from({ length: 6 }, (_, i) => <Skeleton key={i} className="mx-auto size-[86px] rounded-full" />)}
+      </div>
+    )
+  }
+  if (query.data.items.length === 0) {
+    return <EmptyState size="sm" title="No spending in this period" description="Add an expense and you’ll see how your spending splits." />
+  }
+  return (
+    <ul className="grid grid-cols-3 gap-x-2 gap-y-4 xl:grid-cols-6">
+      {query.data.items.map((item) => (
+        <li key={item.category_id} className="flex min-w-0 flex-col items-center gap-1.5 text-center">
+          <ShareRing percentage={item.percentage} size="size-[86px]">
+            <span className="text-base font-semibold text-ink tabular-nums" aria-hidden="true">{Math.round(item.percentage)}%</span>
+          </ShareRing>
+          <p className="text-label leading-tight font-medium text-ink">{item.category_name}</p>
+          <p className="text-xs text-ink-subtle tabular-nums">
+            {formatKzt(item.total_cents)}
+            <span className="sr-only">, {item.percentage}%</span>
+          </p>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+type SortKey = 'name' | 'amount' | 'count'
+type Sort = { key: SortKey; dir: 'asc' | 'desc' }
+
+/**
+ * Categories in the chosen order, each with its activity in the period (if any). The full list is
+ * loaded, so sorting here covers every row (ordering only, no maths).
+ */
+function sortRows(categories: Category[], items: Item[], sort: Sort): { category: Category; item?: Item }[] {
+  const byId = new Map(items.map((item) => [item.category_id, item]))
   const value = (c: Category) =>
     sort.key === 'name' ? 0 : sort.key === 'count' ? (byId.get(c.id)?.transaction_count ?? 0) : (byId.get(c.id)?.total_cents ?? 0)
-  const rows = [...categories].sort((a, b) => {
-    const order = sort.key === 'name' ? a.name.localeCompare(b.name) : value(a) - value(b) || a.name.localeCompare(b.name)
-    return sort.dir === 'asc' ? order : -order
-  })
+  return [...categories]
+    .sort((a, b) => {
+      const byName = a.name.localeCompare(b.name)
+      if (sort.key === 'name') return sort.dir === 'asc' ? byName : -byName
+      // Equal amounts or counts stay in name order (A to Z) in either direction.
+      return (sort.dir === 'asc' ? value(a) - value(b) : value(b) - value(a)) || byName
+    })
+    .map((category) => ({ category, item: byId.get(category.id) }))
+}
+
+type LedgerProps = {
+  categories: Category[]
+  breakdown: BreakdownQuery
+  searching: boolean
+  periodName: string
+  onEdit: (category: Category) => void
+  onDelete: (category: Category) => void
+}
+
+function NoMatches({ searching, type, action }: { searching: boolean; type: TransactionType; action?: ReactNode }) {
+  return (
+    <EmptyState
+      size="sm"
+      title={searching ? 'No categories match your search' : `No ${type} categories yet`}
+      action={searching ? undefined : action}
+    />
+  )
+}
+
+/** "Default" or nothing: the seeded categories are marked, the user's own are not. */
+function DefaultTag() {
+  return <span className="ml-1 hidden shrink-0 rounded-md border border-line-strong px-1.5 text-[11px] leading-[18px] font-semibold text-ink-subtle xl:inline">Default</span>
+}
+
+/** Expense categories: a table of bordered rows from lg (sortable), card rows below. */
+function ExpenseLedger({ categories, breakdown, searching, periodName, onEdit, onDelete, className = '' }: LedgerProps & { className?: string }) {
+  const [sort, setSort] = useState<Sort>({ key: 'amount', dir: 'desc' })
+  const rows = sortRows(categories, breakdown.data?.items ?? [], sort)
   const toggleSort = (key: SortKey) =>
     setSort((current) => (current.key === key ? { key, dir: current.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: key === 'name' ? 'asc' : 'desc' }))
   const largest = breakdown.data?.items[0]?.total_cents ?? 0
-  const amountHeader = income ? 'Earned' : 'Spent'
+  const quiet = periodName === 'All time' ? 'No spending yet' : `No spending in ${periodName}`
 
   return (
-    <section className={cardClass} aria-labelledby={`ledger-${type}`}>
-      <div className="flex flex-wrap items-end justify-between gap-3 border-b border-line px-5 py-4">
-        <div>
-          <h2 id={`ledger-${type}`} className="text-heading text-ink">{income ? 'Income categories' : 'Expense categories'}</h2>
-          <p className="mt-0.5 text-xs text-ink-subtle">{categories.length} shown · {periodLabel}</p>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="text-right">
-            <p className={labelClass}>{amountHeader}</p>
-            {breakdown.isError ? (
-              <p className="text-sm text-ink-subtle">—</p>
-            ) : breakdown.data ? (
-              <p className={`text-lg font-semibold tracking-tight tabular-nums ${income ? 'text-income' : 'text-ink'}`}>{formatKzt(breakdown.data.total_cents)}</p>
-            ) : (
-              <Skeleton className="mt-1 h-5 w-24" />
-            )}
-          </div>
-          <Button variant="secondary" size="sm" onClick={onAdd}><PlusIcon /> New</Button>
-        </div>
+    <section className={`${cardClass} p-4 lg:px-5 lg:py-[18px] ${className}`} aria-labelledby="ledger-expense">
+      <div className="mb-1 flex items-baseline justify-between gap-3">
+        <h2 id="ledger-expense" className="text-heading text-ink">Expense categories</h2>
+        <span className="text-[12.5px] text-ink-subtle tabular-nums">{categories.length}</span>
       </div>
-
-      {breakdown.isError && <div className="border-b border-line p-4"><ErrorState error={breakdown.error} onRetry={() => breakdown.refetch()} /></div>}
+      {breakdown.isError && <div className="py-2"><ErrorState error={breakdown.error} onRetry={() => breakdown.refetch()} /></div>}
 
       {rows.length === 0 ? (
-        <EmptyState
-          size="sm"
-          title={searching ? 'No categories match your search' : `No ${type} categories yet`}
-          action={searching ? undefined : <Button size="sm" variant="secondary" onClick={onAdd}><PlusIcon /> Add one</Button>}
-        />
+        <NoMatches searching={searching} type="expense" />
       ) : (
         <>
-          <ul className="divide-y divide-line md:hidden">
-            {rows.map((c) => {
-              const item = byId.get(c.id)
-              return (
-                <li key={c.id} className="group flex items-center gap-3 px-4 py-3">
-                  <span className="size-2.5 shrink-0 rounded-[2px]" style={{ backgroundColor: c.color }} aria-hidden="true" />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-label font-medium text-ink">{c.name}</p>
-                    <p className="text-xs text-ink-subtle">{item ? `${item.transaction_count} transactions · ${item.percentage}%` : 'No activity'}</p>
-                  </div>
-                  <span className={`text-label font-semibold tabular-nums ${item ? 'text-ink' : 'text-ink-subtle'}`}>{item ? formatKzt(item.total_cents) : '—'}</span>
-                  <RowActions category={c} onEdit={onEdit} onDelete={onDelete} />
-                </li>
-              )
-            })}
+          <ul className="flex flex-col gap-[9px] pt-2 lg:hidden">
+            {rows.map(({ category: c, item }) => (
+              <li key={c.id} className="group relative flex items-center gap-3 rounded-xl border border-line-strong bg-white/[0.012] px-3 py-2.5 transition-colors can-hover:hover:bg-surface-raised">
+                <CategoryIcon name={c.name} color={c.color} />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold text-ink">{c.name}</p>
+                  <p className="truncate text-[12.5px] text-ink-subtle">{item ? `${item.percentage}% · ${transactionCount(item.transaction_count)}` : quiet}</p>
+                </div>
+                <span className={`shrink-0 text-sm font-semibold tabular-nums ${item ? 'text-ink' : 'text-ink-subtle'}`}>{item ? formatKzt(item.total_cents) : '—'}</span>
+                <RowActions category={c} onEdit={onEdit} onDelete={onDelete} overlay />
+              </li>
+            ))}
           </ul>
-          <table className={`${table.table} hidden md:table`}>
-            <caption className="sr-only">{income ? 'Income categories' : 'Expense categories'}</caption>
+          <table className={`${table.table} hidden lg:table`}>
+            <caption className="sr-only">Expense categories</caption>
             <thead>
               <tr>
                 <SortHeader label="Category" sortKey="name" sort={sort} onSort={toggleSort} />
-                <SortHeader label={amountHeader} sortKey="amount" sort={sort} onSort={toggleSort} className="w-36" align="right" />
-                <th scope="col" className={`${flushTh} w-56`}>Share</th>
-                <SortHeader label="Transactions" sortKey="count" sort={sort} onSort={toggleSort} className="w-36" align="right" />
-                <th scope="col" className={`${flushTh} w-20`}><span className="sr-only">Actions</span></th>
+                <SortHeader label="Spent" sortKey="amount" sort={sort} onSort={toggleSort} className="w-28" align="right" />
+                <th scope="col" className={`${flushTh} w-36 xl:w-44`}>Share</th>
+                <SortHeader label="Count" sortKey="count" sort={sort} onSort={toggleSort} className="w-[72px]" align="right" />
+                <th scope="col" className={`${flushTh} w-[84px]`}><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((c) => {
-                const item = byId.get(c.id)
+              {rows.map(({ category: c, item }) => {
                 // Bar width is presentation only; the percentage text comes from the backend.
                 const width = item && largest > 0 ? Math.max((item.total_cents / largest) * 100, 3) : 0
                 return (
                   <tr key={c.id} className={table.row}>
                     <td className={table.td}>
                       <div className="flex min-w-0 items-center gap-3">
-                        <span className="size-2.5 shrink-0 rounded-[2px]" style={{ backgroundColor: c.color }} aria-hidden="true" />
-                        <span className="truncate font-medium text-ink">{c.name}</span>
-                        <span className="shrink-0 text-xs text-ink-subtle">{c.is_default ? 'Default' : 'Custom'}</span>
+                        <CategoryIcon name={c.name} color={c.color} size="sm" />
+                        <span className="truncate font-semibold text-ink" title={c.name}>{c.name}</span>
+                        {c.is_default ? <DefaultTag /> : null}
                       </div>
                     </td>
-                    <td className={`${table.td} text-right font-semibold tabular-nums ${item ? (income ? 'text-income' : 'text-ink') : 'text-ink-subtle'}`}>
-                      {breakdown.isPending ? <Skeleton className="ml-auto h-3 w-16" /> : item ? formatKzt(item.total_cents) : '—'}
-                    </td>
-                    <td className={table.td}>
-                      <div className="flex items-center gap-2.5">
-                        <div className="h-1 flex-1 bg-ink/[0.06]" aria-hidden="true">
-                          <div className="h-1" style={{ width: `${width}%`, backgroundColor: c.color }} />
-                        </div>
-                        <span className="w-12 text-right text-xs text-ink-subtle tabular-nums">{item ? `${item.percentage}%` : '—'}</span>
-                      </div>
-                    </td>
-                    <td className={`${table.td} text-right text-label tabular-nums ${item ? 'text-ink-muted' : 'text-ink-subtle'}`}>
-                      {item ? item.transaction_count : 0}
-                    </td>
+                    {item ? (
+                      <>
+                        <td className={`${table.td} text-right font-semibold text-ink tabular-nums`}>{formatKzt(item.total_cents)}</td>
+                        <td className={table.td}>
+                          <div className="flex items-center gap-2.5">
+                            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-selected" aria-hidden="true">
+                              <span className="block h-full rounded-full" style={{ width: `${width}%`, backgroundColor: c.color }} />
+                            </div>
+                            <span className="w-[52px] text-right text-[12.5px] text-ink-subtle tabular-nums">{item.percentage}%</span>
+                          </div>
+                        </td>
+                        <td className={`${table.td} text-right text-ink-muted tabular-nums`}>{item.transaction_count}</td>
+                      </>
+                    ) : (
+                      <td colSpan={3} className={`${table.td} text-center text-label text-ink-subtle`}>
+                        {breakdown.isPending ? <Skeleton className="mx-auto h-3 w-32" /> : quiet}
+                      </td>
+                    )}
                     <td className={`${table.td} px-2`}>
                       <RowActions category={c} onEdit={onEdit} onDelete={onDelete} />
                     </td>
@@ -281,13 +354,53 @@ function CategoryLedger({ type, categories, breakdown, periodLabel, searching, o
   )
 }
 
-type SortKey = 'name' | 'amount' | 'count'
+/** Income categories: a short list of card rows, largest first, and a button to add one. */
+function IncomeLedger({ categories, breakdown, searching, periodName, onEdit, onDelete, onAdd }: LedgerProps & { onAdd: () => void }) {
+  const rows = sortRows(categories, breakdown.data?.items ?? [], { key: 'amount', dir: 'desc' })
+  const quiet = periodName === 'All time' ? 'No income yet' : `No income in ${periodName}`
+  const add = (
+    <Button variant="secondary" onClick={onAdd} className="w-full pointer-coarse:h-11">
+      <PlusIcon strokeWidth={2.2} /> Add income category
+    </Button>
+  )
+  return (
+    <section className={`${cardClass} flex flex-col p-4 lg:px-5 lg:py-[18px]`} aria-labelledby="ledger-income">
+      <div className="mb-3 flex items-baseline justify-between gap-3">
+        <h2 id="ledger-income" className="text-heading text-ink">Income categories</h2>
+        <span className="text-[12.5px] text-ink-subtle tabular-nums">{categories.length}</span>
+      </div>
+      {breakdown.isError && <div className="pb-2"><ErrorState error={breakdown.error} onRetry={() => breakdown.refetch()} /></div>}
+      {rows.length === 0 ? (
+        <NoMatches searching={searching} type="income" />
+      ) : (
+        <ul className="flex flex-col gap-[9px]">
+          {rows.map(({ category: c, item }) => (
+            <li key={c.id} className="group relative flex items-center gap-3 rounded-xl border border-line-strong bg-white/[0.012] px-3 py-2.5 transition-colors can-hover:hover:bg-surface-raised">
+              <CategoryIcon name={c.name} color={c.color} />
+              <div className="min-w-0 flex-1">
+                <p className="flex items-center text-sm font-semibold text-ink">
+                  <span className="truncate">{c.name}</span>
+                </p>
+                <p className="truncate text-[12.5px] text-ink-subtle">{item ? transactionCount(item.transaction_count) : quiet}</p>
+              </div>
+              <span className={`shrink-0 text-sm font-semibold tabular-nums ${item ? 'text-income' : 'text-ink-subtle'}`}>
+                {item ? `+${formatKzt(item.total_cents)}` : '—'}
+              </span>
+              <RowActions category={c} onEdit={onEdit} onDelete={onDelete} overlay />
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="pt-3">{add}</div>
+    </section>
+  )
+}
 
 /** Column header that sorts the ledger; announces the current order with aria-sort. */
 function SortHeader({ label, sortKey, sort, onSort, className = '', align = 'left' }: {
   label: string
   sortKey: SortKey
-  sort: { key: SortKey; dir: 'asc' | 'desc' }
+  sort: Sort
   onSort: (key: SortKey) => void
   className?: string
   align?: 'left' | 'right'
@@ -298,7 +411,7 @@ function SortHeader({ label, sortKey, sort, onSort, className = '', align = 'lef
       <button
         type="button"
         onClick={() => onSort(sortKey)}
-        className={`inline-flex items-center gap-1 rounded-sm hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${active ? 'text-ink' : ''}`}
+        className={`inline-flex items-center gap-1 rounded-sm hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus ${active ? 'text-ink' : ''}`}
       >
         {label}
         <ChevronDownIcon
@@ -310,13 +423,15 @@ function SortHeader({ label, sortKey, sort, onSort, className = '', align = 'lef
   )
 }
 
-function RowActions({ category, onEdit, onDelete }: {
+/** Edit/delete, revealed on hover or focus; `overlay` floats them over the end of a list row. */
+function RowActions({ category, onEdit, onDelete, overlay = false }: {
   category: Category
   onEdit: (category: Category) => void
   onDelete: (category: Category) => void
+  overlay?: boolean
 }) {
   return (
-    <div className="flex shrink-0 justify-end gap-0.5 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 [@media(hover:hover)]:opacity-0">
+    <div className={`flex shrink-0 justify-end gap-1.5 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 can-hover:opacity-0 ${overlay ? 'row-actions-overlay' : ''}`}>
       <IconButton label={`Edit ${category.name}`} onClick={() => onEdit(category)}>
         <PencilIcon />
       </IconButton>
@@ -331,8 +446,9 @@ function RowActions({ category, onEdit, onDelete }: {
 function CategoryForm({ category, defaultType = 'expense', onDone }: {
   category?: Category
   defaultType?: TransactionType
-  onDone?: () => void
+  onDone: () => void
 }) {
+  const toast = useToast()
   const create = useCreateCategory()
   const update = useUpdateCategory()
   const mutation = category ? update : create
@@ -342,13 +458,11 @@ function CategoryForm({ category, defaultType = 'expense', onDone }: {
   const [color, setColor] = useState(category?.color ?? DEFAULT_COLOR)
   const [nameError, setNameError] = useState<string>()
   const [formError, setFormError] = useState<string | null>(null)
-  const [saved, setSaved] = useState<string | null>(null)
   const idPrefix = category ? `edit-${category.id}` : 'new'
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
     setFormError(null)
-    setSaved(null)
     const trimmed = name.trim()
     if (!trimmed) {
       setNameError('Enter a name.')
@@ -359,12 +473,12 @@ function CategoryForm({ category, defaultType = 'expense', onDone }: {
     try {
       if (category) {
         await update.mutateAsync({ id: category.id, body: { name: trimmed, type, color } })
+        toast('Category updated')
       } else {
         await create.mutateAsync({ name: trimmed, type, color })
-        setName('')
-        setSaved(`Added “${trimmed}”.`)
+        toast(`Added “${trimmed}”`)
       }
-      onDone?.()
+      onDone()
     } catch (error) {
       if (error instanceof ApiError) {
         setNameError(error.fieldErrors.name)
@@ -387,7 +501,7 @@ function CategoryForm({ category, defaultType = 'expense', onDone }: {
           aria-invalid={!!nameError}
           aria-describedby={describedBy(`${idPrefix}-name`, nameError)}
           className={inputClass(!!nameError)}
-          placeholder="e.g. Pets"
+          placeholder="For example, Pets"
         />
       </Field>
       <Field
@@ -395,16 +509,15 @@ function CategoryForm({ category, defaultType = 'expense', onDone }: {
         label="Type"
         hint={category ? 'The type can only change while no transactions use this category.' : undefined}
       >
-        <select
+        <Select
           id={`${idPrefix}-type`}
           value={type}
           onChange={(e) => setType(e.target.value as TransactionType)}
           aria-describedby={category ? `${idPrefix}-type-hint` : undefined}
-          className={inputClass()}
         >
           <option value="expense">Expense</option>
           <option value="income">Income</option>
-        </select>
+        </Select>
       </Field>
       <Field id={`${idPrefix}-color`} label="Colour">
         <div className="flex items-center gap-3">
@@ -413,26 +526,19 @@ function CategoryForm({ category, defaultType = 'expense', onDone }: {
             type="color"
             value={color}
             onChange={(e) => setColor(e.target.value)}
-            className="h-9 w-14 cursor-pointer rounded-lg border border-line bg-surface p-1"
+            className="h-[42px] w-16 cursor-pointer rounded-[var(--radius-control)] border border-field bg-surface-raised p-1 focus:border-focus focus:ring-3 focus:ring-focus/25 focus:outline-none"
           />
           <span className="font-mono text-xs text-ink-subtle">{color}</span>
         </div>
       </Field>
       <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-        {onDone && (
-          <Button variant="secondary" onClick={onDone}>
-            Cancel
-          </Button>
-        )}
+        <Button variant="secondary" onClick={onDone}>
+          Cancel
+        </Button>
         <Button type="submit" disabled={mutation.isPending}>
           {mutation.isPending ? 'Saving…' : category ? 'Save changes' : (<><PlusIcon /> Add category</>)}
         </Button>
       </div>
-      {saved && (
-        <p role="status" className="text-sm text-emerald-700">
-          {saved}
-        </p>
-      )}
     </form>
   )
 }

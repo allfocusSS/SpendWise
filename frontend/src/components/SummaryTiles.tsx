@@ -1,47 +1,58 @@
 import type { UseQueryResult } from '@tanstack/react-query'
+import type { ReactNode } from 'react'
 
 import type { Summary } from '../api/client'
-import { formatKzt } from '../lib/money'
-import { labelClass } from '../lib/styles'
-import { InlineError, Skeleton } from './ui'
+import { cardClass } from '../lib/styles'
+import { CalendarIcon } from './icons'
+import { Figure, InlineError, Skeleton } from './ui'
 
-function Cell({ label, value, query, valueClassName = 'text-ink' }: {
+/** A line under each figure, e.g. "3 income categories". */
+export type TileNotes = { net?: ReactNode; income?: ReactNode; expense?: ReactNode; count?: ReactNode }
+
+/** One stat card: its own term and value (so the value's text is exactly the figure), then a note. */
+function Tile({ label, query, note, children }: {
   label: string
-  value?: string
-  valueClassName?: string
   query: UseQueryResult<Summary>
+  note?: ReactNode
+  children?: ReactNode
 }) {
   return (
-    // One row of four on wide screens, 2 × 2 below that; hairlines between cells.
-    <div className="flex min-w-0 flex-col gap-1.5 border-line px-4 py-4 odd:pl-0 even:border-l nth-[n+3]:border-t sm:px-6 sm:odd:pl-0 xl:border-l xl:first:border-l-0 xl:nth-3:pl-6 xl:nth-[n+3]:border-t-0">
-      <dt className={labelClass}>{label}</dt>
-      <dd>
-        {query.isError ? (
-          <InlineError error={query.error} onRetry={() => query.refetch()} />
-        ) : query.isPending || value === undefined ? (
-          <Skeleton className="mt-1 h-6 w-2/3" />
-        ) : (
-          <p className={`truncate text-lg font-semibold tracking-tight tabular-nums sm:text-figure ${valueClassName}`} title={value}>{value}</p>
-        )}
-      </dd>
+    <div className={`${cardClass} flex min-w-0 flex-col gap-2 p-4 lg:px-5 lg:py-[18px]`}>
+      <dl className="flex min-w-0 flex-col gap-2">
+        <dt className="text-[15px] font-medium tracking-[-0.005em] text-ink">{label}</dt>
+        <dd className="min-w-0">
+          {query.isError ? (
+            <InlineError error={query.error} onRetry={() => query.refetch()} />
+          ) : query.isPending || children === undefined ? (
+            <Skeleton className="h-[33px] w-2/3" />
+          ) : (
+            <p className="truncate text-figure xl:text-figure-lg">{children}</p>
+          )}
+        </dd>
+      </dl>
+      {note ? <p className="text-[12.5px] text-ink-subtle">{note}</p> : null}
     </div>
   )
 }
 
-/** Net change / money in / money out / count for one period, as one open row of totals (all from the backend). */
-export function SummaryTiles({ query, period }: { query: UseQueryResult<Summary>; period: string }) {
+/** Net change / money in / money out / count for one period, as four stat cards (all from the backend). */
+export function SummaryTiles({ query, period, notes = {} }: { query: UseQueryResult<Summary>; period: string; notes?: TileNotes }) {
   const data = query.data
+  const net = data?.balance_cents ?? 0
   return (
     <section aria-label={`Totals, ${period}`}>
-      <p className={labelClass}>
-        Totals · <span className="text-ink-muted">{period}</span>
+      <p className="mb-2.5 flex items-center gap-2 text-label text-ink-muted">
+        <CalendarIcon className="size-4 text-ink-subtle" />
+        {period}
       </p>
-      <dl className="mt-2 grid grid-cols-2 border-y border-line xl:grid-cols-4">
-        <Cell label="Net change" value={data && formatKzt(data.balance_cents)} valueClassName={data && data.balance_cents < 0 ? 'text-expense' : 'text-ink'} query={query} />
-        <Cell label="Money in" value={data && formatKzt(data.total_income_cents)} valueClassName="text-income" query={query} />
-        <Cell label="Money out" value={data && formatKzt(data.total_expense_cents)} query={query} />
-        <Cell label="Transactions" value={data && String(data.transaction_count)} query={query} />
-      </dl>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-[18px]">
+        <Tile label="Net change" query={query} note={notes.net}>
+          {data ? <span className={net > 0 ? 'text-income' : net < 0 ? 'text-expense' : ''}><Figure cents={net} signed /></span> : undefined}
+        </Tile>
+        <Tile label="Money in" query={query} note={notes.income}>{data ? <Figure cents={data.total_income_cents} /> : undefined}</Tile>
+        <Tile label="Money out" query={query} note={notes.expense}>{data ? <Figure cents={data.total_expense_cents} /> : undefined}</Tile>
+        <Tile label="Transactions" query={query} note={notes.count}>{data ? <span className="tabular-nums">{data.transaction_count}</span> : undefined}</Tile>
+      </div>
     </section>
   )
 }

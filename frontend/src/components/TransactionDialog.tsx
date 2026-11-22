@@ -6,13 +6,14 @@ import { queryKeys, useCategories, useSaveTransaction } from '../api/queries'
 import { todayIso } from '../lib/dates'
 import { parseKztToTiyn, tiynToInput } from '../lib/money'
 import { describedBy, inputClass } from '../lib/styles'
+import { useToast } from '../lib/toast'
 import { CategoryIcon } from './CategoryIcon'
 import { DialogErrorFallback, ErrorBoundary } from './ErrorBoundary'
 import { ArrowDownLeftIcon, ArrowUpRightIcon } from './icons'
 import { Modal } from './Modal'
 import { Button, Field, FormError, LoadingState } from './ui'
 
-const AMOUNT_HINT = 'e.g. 2500 or 2 500,50'
+const AMOUNT_HINT = 'For example 2500 or 2 500,50'
 
 type FormErrors = Partial<Record<'amount' | 'type' | 'category' | 'description' | 'date', string>>
 
@@ -55,6 +56,7 @@ function TransactionForm({ transaction, defaultType, onDone }: {
 }) {
   const categories = useCategories()
   const save = useSaveTransaction()
+  const toast = useToast()
   const formRef = useRef<HTMLFormElement>(null)
 
   const [type, setType] = useState<TransactionType>(transaction?.type ?? defaultType)
@@ -107,6 +109,7 @@ function TransactionForm({ transaction, defaultType, onDone }: {
           source: transaction?.source ?? 'manual',
         },
       })
+      toast(transaction ? 'Transaction updated' : type === 'income' ? 'Income added' : 'Expense added')
       onDone()
     } catch (error) {
       if (error instanceof ApiError) {
@@ -156,25 +159,19 @@ function TransactionForm({ transaction, defaultType, onDone }: {
             return (
               <label
                 key={option}
-                className={`flex cursor-pointer items-center gap-3 rounded-[var(--radius-control)] border px-3 py-2.5 transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent ${
-                  active
-                    ? income
-                      ? 'border-income/35 bg-income-soft'
-                      : 'border-expense/35 bg-expense-soft'
-                    : 'border-line bg-surface-sunken hover:border-line-strong'
+                className={`flex cursor-pointer items-center gap-3 rounded-[14px] border px-3.5 py-3 transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-focus ${
+                  active ? 'border-focus bg-surface-selected ring-3 ring-focus/20' : 'border-field bg-surface-raised hover:bg-surface-selected'
                 }`}
               >
                 <input type="radio" name="type" value={option} checked={active} onChange={() => changeType(option)} className="sr-only" />
                 <span
-                  className={`grid size-8 shrink-0 place-items-center rounded-md ${
-                    active ? (income ? 'bg-income-solid text-white' : 'bg-expense-solid text-white') : 'bg-surface-raised text-ink-subtle'
-                  }`}
+                  className={`grid size-9 shrink-0 place-items-center rounded-full ${income ? 'bg-income-soft text-income' : 'bg-expense-soft text-expense'}`}
                   aria-hidden="true"
                 >
                   <Icon className="size-4" strokeWidth={2} />
                 </span>
                 <span className="min-w-0">
-                  <span className="block text-label font-semibold text-ink">{income ? 'Income' : 'Expense'}</span>
+                  <span className="block text-sm font-semibold text-ink">{income ? 'Income' : 'Expense'}</span>
                   <span className="block truncate text-xs text-ink-subtle">{income ? 'Money coming in' : 'Money going out'}</span>
                 </span>
               </label>
@@ -186,10 +183,8 @@ function TransactionForm({ transaction, defaultType, onDone }: {
       <div>
         <label htmlFor="tx-amount" className="text-label font-medium text-ink">Amount</label>
         <div
-          className={`mt-2 flex items-center gap-3 rounded-[var(--radius-control)] border bg-surface-sunken px-4 py-4 transition-colors focus-within:ring-3 ${
-            errors.amount
-              ? 'border-danger/60 focus-within:ring-danger/15'
-              : 'border-line hover:border-line-strong focus-within:border-accent focus-within:ring-accent/15'
+          className={`mt-2 flex items-center gap-3 rounded-[14px] border bg-surface-raised px-4 py-3.5 transition-colors focus-within:ring-3 ${
+            errors.amount ? 'border-danger focus-within:ring-danger/20' : 'border-field focus-within:border-focus focus-within:ring-focus/25'
           }`}
         >
           <span className="text-2xl text-ink-subtle" aria-hidden="true">₸</span>
@@ -201,7 +196,7 @@ function TransactionForm({ transaction, defaultType, onDone }: {
             onChange={(e) => setAmount(e.target.value)}
             aria-invalid={!!errors.amount}
             aria-describedby={describedBy('tx-amount', errors.amount, AMOUNT_HINT)}
-            className="w-full min-w-0 bg-transparent text-figure-lg tabular-nums text-ink caret-accent placeholder:text-ink-subtle/40 focus:outline-none"
+            className="w-full min-w-0 bg-transparent text-[34px] leading-tight font-[650] tracking-[-0.035em] tabular-nums text-ink caret-accent placeholder:text-ink-subtle/50 focus:outline-none"
             placeholder="0"
           />
         </div>
@@ -216,15 +211,15 @@ function TransactionForm({ transaction, defaultType, onDone }: {
         <legend className="mb-1.5 text-label font-medium text-ink">Category</legend>
         {options.length > 0 && (
           <div
-            className={`grid grid-cols-2 gap-1.5 rounded-[var(--radius-control)] p-0.5 ${errors.category ? 'ring-1 ring-danger/50' : ''}`}
+            className={`grid grid-cols-2 gap-2 rounded-[var(--radius-control)] p-0.5 ${errors.category ? 'ring-1 ring-danger' : ''}`}
           >
             {options.map((c) => {
               const selected = categoryId === String(c.id)
               return (
                 <label
                   key={c.id}
-                  className={`flex min-w-0 cursor-pointer items-center gap-2 rounded-[var(--radius-control)] border px-2 py-1.5 text-label transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-1 has-[:focus-visible]:outline-accent ${
-                    selected ? 'border-ink-muted bg-surface-raised font-medium text-ink' : 'border-line bg-surface-sunken text-ink-muted hover:border-line-strong hover:text-ink'
+                  className={`flex min-h-11 min-w-0 cursor-pointer items-center gap-2.5 rounded-xl border px-2 py-1.5 text-label transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-1 has-[:focus-visible]:outline-focus ${
+                    selected ? 'border-accent/60 bg-accent-soft font-medium text-ink' : 'border-line-strong bg-surface-raised text-ink-muted hover:text-ink'
                   }`}
                 >
                   <input
@@ -271,7 +266,7 @@ function TransactionForm({ transaction, defaultType, onDone }: {
             aria-invalid={!!errors.description}
             aria-describedby={describedBy('tx-description', errors.description)}
             className={inputClass(!!errors.description)}
-            placeholder="e.g. Groceries at Magnum"
+            placeholder="What was it for?"
           />
         </Field>
       </div>

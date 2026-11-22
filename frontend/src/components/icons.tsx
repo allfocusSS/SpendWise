@@ -42,6 +42,11 @@ export const AlertIcon = (props: IconProps) => <Icon {...props}><><circle cx="12
 export const CalendarIcon = (props: IconProps) => <Icon {...props}><><rect x="3.5" y="5" width="17" height="15" rx="2" /><path d="M8 3v4M16 3v4M3.5 10h17" /></></Icon>
 export const ReceiptIcon = (props: IconProps) => <Icon {...props}><><path d="M6 3h12v18l-3-2-3 2-3-2-3 2Z" /><path d="M9 8h6M9 12h6" /></></Icon>
 export const ChartIcon = (props: IconProps) => <Icon {...props}><><path d="M4 4v16h16" /><path d="m7 15 4-4 3 3 5-6" /></></Icon>
+export const PieIcon = (props: IconProps) => <Icon {...props}><><path d="M12 3v9h9" /><path d="M21 12a9 9 0 1 1-9-9" /></></Icon>
+export const LogoutIcon = (props: IconProps) => <Icon {...props}><path d="M14 4h4.5A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5H14M10 16l-4-4 4-4M6 12h10" /></Icon>
+export const LockIcon = (props: IconProps) => <Icon {...props}><><rect x="5" y="10.5" width="14" height="9.5" rx="2" /><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" /></></Icon>
+export const TrendFlatIcon = (props: IconProps) => <Icon {...props}><path d="M4 12h16" /></Icon>
+export const CheckIcon = (props: IconProps) => <Icon {...props}><path d="m5 12.5 4.5 4.5L19 7.5" /></Icon>
 
 // --- Navigation ---------------------------------------------------------------------------
 export const DashboardIcon = (props: IconProps) => <Icon {...props}><><rect x="3.5" y="3.5" width="7" height="9" rx="1.5" /><rect x="13.5" y="3.5" width="7" height="5" rx="1.5" /><rect x="13.5" y="11.5" width="7" height="9" rx="1.5" /><rect x="3.5" y="15.5" width="7" height="5" rx="1.5" /></></Icon>
@@ -53,6 +58,8 @@ export const AnalyticsIcon = (props: IconProps) => <Icon {...props}><><path d="M
 export const WalletIcon = (props: IconProps) => <Icon {...props}><><path d="M19 7V5.5A1.5 1.5 0 0 0 17.5 4h-12A1.5 1.5 0 0 0 4 5.5v13A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16" /><path d="M14 10h6.5v6H14a3 3 0 0 1 0-6Z" /></></Icon>
 export const ArrowDownLeftIcon = (props: IconProps) => <Icon {...props}><path d="M17 7 7 17M16 17H7V8" /></Icon>
 export const ArrowUpRightIcon = (props: IconProps) => <Icon {...props}><path d="M7 17 17 7M8 7h9v9" /></Icon>
+export const TrendUpIcon = (props: IconProps) => <Icon {...props}><path d="m3 17 6-6 4 4 8-8M15 7h6v6" /></Icon>
+export const TrendDownIcon = (props: IconProps) => <Icon {...props}><path d="m3 7 6 6 4-4 8 8M15 17h6v-6" /></Icon>
 export const PiggyIcon = (props: IconProps) => <Icon {...props}><><path d="M5 11a7 6 0 0 1 12.5-3.6L20 6v4h1.5v3H20a7 7 0 0 1-3 3.5V19h-3v-1.5h-4V19H7v-2.6A6.5 6.5 0 0 1 5 11Z" /><path d="M15.5 10.5h.01" /></></Icon>
 export const SwatchIcon = (props: IconProps) => <Icon {...props}><><circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="3.5" /></></Icon>
 

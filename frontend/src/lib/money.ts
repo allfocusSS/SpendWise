@@ -31,7 +31,7 @@ export function parseKztToTiyn(input: string): ParseResult {
 
   const match = AMOUNT_PATTERN.exec(cleaned)
   if (!match) {
-    return { ok: false, error: 'Enter a positive amount with up to 2 decimals, e.g. 2500 or 2 500,50.' }
+    return { ok: false, error: 'Enter a positive amount with up to two decimals, like 2500 or 2 500,50.' }
   }
 
   const whole = match[1].replace(/^0+(?=\d)/, '') // drop leading zeros, keep a single "0"
@@ -73,13 +73,24 @@ const fractionFormatter = new Intl.NumberFormat('ru-KZ', {
 /**
  * Format integer tiyn as tenge for display: 250000 → "2 500 ₸", 250050 → "2 500,50 ₸".
  * Whole amounts are shown without decimals. Negative values (e.g. balances) keep the sign.
+ * Digit groups and the currency sign are set off by narrow no-break spaces (U+202F), which keep
+ * large figures compact and never break across lines.
  */
 export function formatKzt(tiyn: number): string {
   if (!Number.isSafeInteger(tiyn)) {
     throw new RangeError(`formatKzt expects an integer number of tiyn, got ${tiyn}`)
   }
   // Display only: the division result is passed straight to Intl, never stored or summed.
-  return tiyn % 100 === 0 ? wholeFormatter.format(tiyn / 100) : fractionFormatter.format(tiyn / 100)
+  const text = tiyn % 100 === 0 ? wholeFormatter.format(tiyn / 100) : fractionFormatter.format(tiyn / 100)
+  return text.replace(/\u00a0/g, '\u202f')
+}
+
+/**
+ * Format with an explicit sign and a true minus: "+287 000 ₸", "−12 500 ₸", "0 ₸". For nets and
+ * comparisons, where the sign is the point. Display only.
+ */
+export function formatSignedKzt(tiyn: number): string {
+  return `${tiyn > 0 ? '+' : ''}${formatKzt(tiyn).replace(/^-/, '−')}`
 }
 
 /**

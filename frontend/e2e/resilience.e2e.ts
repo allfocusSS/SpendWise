@@ -79,7 +79,7 @@ test.describe('Error boundaries', () => {
     // So does the navigation, and coming back doesn't reload again.
     await goTo(page, 'Transactions')
     await expect(entry(ledger(page), 'Pay')).toBeVisible()
-    await goTo(page, 'Dashboard')
+    await goTo(page, 'Overview')
     await expect(cashFlow(page).getByRole('alert')).toContainText('This chart couldn’t load')
     expect(loads).toBe(2)
 
@@ -103,7 +103,7 @@ test.describe('Error boundaries', () => {
     await expect(page.getByRole('region', { name: 'Recent transactions' })).toContainText('No transactions yet')
 
     await goTo(page, 'Categories')
-    await goTo(page, 'Dashboard')
+    await goTo(page, 'Overview')
     await expect(cashFlow(page).getByRole('alert')).toContainText('This chart couldn’t be shown')
 
     // Good data again: "Try again" fetches it and the chart area recovers.

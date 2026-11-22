@@ -56,6 +56,19 @@ test.describe('Authentication', () => {
     await expect(page.getByRole('heading', { level: 1, name: 'Overview' })).toBeVisible()
   })
 
+  test('the password can be shown while typing and hidden again', { tag: '@mobile' }, async ({ page }) => {
+    await page.goto('/login')
+    const password = page.getByLabel('Password')
+    await password.fill('a secret phrase')
+    await expect(password).toHaveAttribute('type', 'password')
+
+    await page.getByRole('button', { name: 'Show password' }).click()
+    await expect(password).toHaveAttribute('type', 'text')
+    await expect(password).toHaveValue('a secret phrase')
+    await page.getByRole('button', { name: 'Hide password' }).click()
+    await expect(password).toHaveAttribute('type', 'password')
+  })
+
   test('registration explains what is wrong', async ({ page, account }) => {
     await page.request.post('/api/auth/logout')
     await page.goto('/register')

@@ -4,7 +4,7 @@ import { Link, useLocation } from 'react-router'
 import { ApiError } from '../api/client'
 import { useSignup } from '../api/queries'
 import { AuthLayout } from '../components/AuthLayout'
-import { Button, Field, FormError, linkClass } from '../components/ui'
+import { Button, Field, FormError, linkClass, PasswordInput } from '../components/ui'
 import { describedBy, inputClass } from '../lib/styles'
 
 // Must match the backend (app/schemas/auth.py); the server checks again.
@@ -47,6 +47,8 @@ export function RegisterPage() {
     <AuthLayout
       title="Create your account"
       description="Your transactions and categories are private to your account."
+      headline="Start with one transaction."
+      lead="Every transaction you add updates your balance and your monthly charts."
       footer={
         <>
           Already have an account?{' '}
@@ -66,7 +68,7 @@ export function RegisterPage() {
             onChange={(e) => setEmail(e.target.value)}
             aria-invalid={!!fieldErrors.email}
             aria-describedby={describedBy('register-email', fieldErrors.email)}
-            className={inputClass(!!fieldErrors.email)}
+            className={inputClass(!!fieldErrors.email, 'lg')}
           />
         </Field>
         <Field
@@ -75,27 +77,25 @@ export function RegisterPage() {
           error={fieldErrors.password}
           hint={PASSWORD_HINT}
         >
-          <input
+          <PasswordInput
             id="register-password"
-            type="password"
             autoComplete="new-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             aria-invalid={!!fieldErrors.password}
             aria-describedby={describedBy('register-password', fieldErrors.password, PASSWORD_HINT)}
-            className={inputClass(!!fieldErrors.password)}
+            hasError={!!fieldErrors.password}
           />
         </Field>
         <Field id="register-confirm" label="Confirm password" error={fieldErrors.confirm}>
-          <input
+          <PasswordInput
             id="register-confirm"
-            type="password"
             autoComplete="new-password"
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
             aria-invalid={!!fieldErrors.confirm}
             aria-describedby={describedBy('register-confirm', fieldErrors.confirm)}
-            className={inputClass(!!fieldErrors.confirm)}
+            hasError={!!fieldErrors.confirm}
           />
         </Field>
         <Button type="submit" size="lg" disabled={signup.isPending} className="mt-1 w-full">

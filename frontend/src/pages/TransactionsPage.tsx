@@ -2,13 +2,15 @@ import { useState } from 'react'
 
 import type { Transaction, TransactionType } from '../api/client'
 import { useCategories, useDeleteTransaction, useSummary, useTransactions } from '../api/queries'
-import { PlusIcon } from '../components/icons'
+import { CalendarIcon, CloseIcon, PlusIcon } from '../components/icons'
 import { ConfirmDialog } from '../components/Modal'
 import { SummaryTiles } from '../components/SummaryTiles'
 import { SignedAmount, TransactionTable } from '../components/TransactionList'
-import { Button, EmptyState, ErrorState, PageHeader, SearchInput, Segmented, SkeletonRows } from '../components/ui'
+import { Button, EmptyState, ErrorState, PageHeader, SearchInput, Segmented, Select, SkeletonRows } from '../components/ui'
 import { formatDate } from '../lib/dates'
-import { cardClass, inputClass } from '../lib/styles'
+import { cardClass } from '../lib/styles'
+import { transactionCount } from '../lib/text'
+import { useToast } from '../lib/toast'
 import { useTransactionDialog } from '../lib/transactionDialog'
 
 const PAGE_SIZE = 20
@@ -22,6 +24,21 @@ const TYPE_OPTIONS: { value: Filters['type']; label: string }[] = [
   { value: 'expense', label: 'Expenses' },
 ]
 
+/** A removable filter: its value as text; the button's name says what pressing it does. */
+function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onRemove}
+      aria-label={`Remove filter: ${label}`}
+      className="inline-flex h-[30px] items-center gap-1.5 rounded-full border border-accent/35 bg-accent-soft px-2.5 text-[12.5px] font-medium text-ink transition-colors hover:border-accent/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus pointer-coarse:h-11"
+    >
+      {label}
+      <CloseIcon className="size-3 text-ink-muted" strokeWidth={2.4} />
+    </button>
+  )
+}
+
 function rangeLabel(from: string, to: string): string {
   if (from && to) return `${formatDate(from)} – ${formatDate(to)}`
   if (from) return `From ${formatDate(from)}`
@@ -31,6 +48,7 @@ function rangeLabel(from: string, to: string): string {
 
 export function TransactionsPage() {
   const openTransaction = useTransactionDialog()
+  const toast = useToast()
   const [filters, setFilters] = useState<Filters>(NO_FILTERS)
   const [search, setSearch] = useState('')
   const [offset, setOffset] = useState(0)
@@ -73,6 +91,11 @@ export function TransactionsPage() {
   }
 
   const categoryOptions = (categories.data ?? []).filter((c) => !filters.type || c.type === filters.type)
+  const typeName = TYPE_OPTIONS.find((option) => option.value === filters.type)?.label
+  const categoryName = categories.data?.find((c) => String(c.id) === filters.category_id)?.name
+  const dates = filters.date_from || filters.date_to ? rangeLabel(filters.date_from, filters.date_to) : null
+  // The ledger's heading says what it lists: "Expenses · 1 Nov 2026 – 30 Nov 2026", "All transactions".
+  const ledgerTitle = [categoryName ?? (filters.type ? typeName : null), dates].filter(Boolean).join(' · ') || 'All transactions'
   const data = transactions.data
   const term = search.trim().toLowerCase()
   // Search runs in the browser over the rows on this page (the API has no text search).
@@ -84,112 +107,127 @@ export function TransactionsPage() {
 
   return (
     <>
-      <PageHeader title="Transactions" description="Every income and expense you have recorded." />
+      <PageHeader title="Transactions" description="Everything you’ve recorded, newest first." />
 
-      {!invalidRange && (
-        <div className="mb-8">
-          <SummaryTiles query={summary} period={rangeLabel(filters.date_from, filters.date_to)} />
-          {(filters.type || filters.category_id) && (
-            <p className="mt-2 text-xs text-ink-subtle">Totals use the date range only; type and category filters apply to the table.</p>
-          )}
-        </div>
-      )}
+      <div className="flex flex-col gap-3.5 lg:gap-[18px]">
+        {!invalidRange && <SummaryTiles query={summary} period={rangeLabel(filters.date_from, filters.date_to)} />}
 
-      <section className={cardClass} aria-label="Transaction ledger">
-        <form
-          className="flex flex-wrap items-center gap-2 border-b border-line p-4"
-          onSubmit={(e) => e.preventDefault()}
-          aria-label="Search and filter transactions"
-        >
-          <SearchInput label="Search transactions on this page" value={search} onChange={setSearch} placeholder="Search this page…" className="w-full sm:w-60" />
-          <Segmented label="Type" options={TYPE_OPTIONS} value={filters.type} onChange={(type) => updateFilter({ type })} />
-          <div className="w-full sm:w-44">
-            <label htmlFor="f-category" className="sr-only">Category</label>
-            <select id="f-category" value={filters.category_id} onChange={(e) => updateFilter({ category_id: e.target.value })} className={inputClass()}>
-              <option value="">All categories</option>
-              {categoryOptions.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-          </div>
-          <div className="flex w-full items-center gap-1.5 sm:w-auto">
-            <div className="min-w-0 flex-1 sm:w-36 sm:flex-none">
+        <form className={`${cardClass} p-4 lg:px-5 lg:py-[18px]`} onSubmit={(e) => e.preventDefault()} aria-label="Search and filter transactions">
+          <div className="flex flex-wrap items-center gap-2.5 max-lg:[&>*]:basis-full">
+            <SearchInput label="Search transactions on this page" value={search} onChange={setSearch} placeholder="Search this page" className="lg:w-[260px]" />
+            <Segmented
+              label="Type"
+              options={TYPE_OPTIONS}
+              value={filters.type}
+              onChange={(type) => updateFilter({ type })}
+              className="max-lg:grid max-lg:grid-cols-3 max-lg:[&>button]:w-full"
+            />
+            <div className="lg:w-[210px]">
+              <label htmlFor="f-category" className="sr-only">Category</label>
+              <Select id="f-category" value={filters.category_id} onChange={(e) => updateFilter({ category_id: e.target.value })}>
+                <option value="">All categories</option>
+                {categoryOptions.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </Select>
+            </div>
+            <div
+              className={`flex h-[42px] min-w-0 items-center gap-2 rounded-[var(--radius-control)] border bg-surface-raised px-3 focus-within:ring-3 pointer-coarse:h-11 ${
+                invalidRange ? 'border-danger focus-within:ring-danger/20' : 'border-field focus-within:border-focus focus-within:ring-focus/25'
+              }`}
+            >
+              <CalendarIcon className="size-4 shrink-0 text-ink-subtle" />
               <label htmlFor="f-from" className="sr-only">From</label>
               <input id="f-from" type="date" value={filters.date_from} aria-invalid={invalidRange}
-                onChange={(e) => updateFilter({ date_from: e.target.value })} className={inputClass(invalidRange)} />
-            </div>
-            <span className="text-ink-subtle" aria-hidden="true">–</span>
-            <div className="min-w-0 flex-1 sm:w-36 sm:flex-none">
+                onChange={(e) => updateFilter({ date_from: e.target.value })}
+                className="h-full min-w-0 flex-1 bg-transparent text-base text-ink tabular-nums focus:outline-none sm:text-sm lg:w-[8.5rem] lg:flex-none" />
+              <span className="text-ink-subtle" aria-hidden="true">–</span>
               <label htmlFor="f-to" className="sr-only">To</label>
               <input id="f-to" type="date" value={filters.date_to} aria-invalid={invalidRange}
-                onChange={(e) => updateFilter({ date_to: e.target.value })} className={inputClass(invalidRange)} />
+                onChange={(e) => updateFilter({ date_to: e.target.value })}
+                className="h-full min-w-0 flex-1 bg-transparent text-base text-ink tabular-nums focus:outline-none sm:text-sm lg:w-[8.5rem] lg:flex-none" />
             </div>
+            {hasFilters && (
+              <Button variant="ghost" onClick={() => updateFilter(NO_FILTERS)} className="max-lg:hidden lg:ml-auto">
+                Clear
+              </Button>
+            )}
           </div>
+          {invalidRange && (
+            <p role="alert" className="mt-2.5 text-xs font-medium text-danger">“From” must be on or before “To”.</p>
+          )}
           {hasFilters && (
-            <Button variant="ghost" size="sm" onClick={() => updateFilter(NO_FILTERS)}>
-              Clear
-            </Button>
-          )}
-          {data && !invalidRange && (
-            <p className="ml-auto text-label whitespace-nowrap text-ink-subtle" aria-live="polite">
-              <span className="font-semibold text-ink tabular-nums">{data.total}</span> transaction{data.total === 1 ? '' : 's'}
-            </p>
-          )}
-        </form>
-        {invalidRange && (
-          <p role="alert" className="border-b border-line px-4 py-2 text-xs font-medium text-expense">“From” must be on or before “To”.</p>
-        )}
-
-        {invalidRange ? (
-          <EmptyState title="Fix the date range to see transactions" />
-        ) : transactions.isError ? (
-          <div className="p-4"><ErrorState error={transactions.error} onRetry={() => transactions.refetch()} /></div>
-        ) : transactions.isPending || !data ? (
-          <div className="px-4"><SkeletonRows rows={8} label="Loading transactions" /></div>
-        ) : data.total === 0 ? (
-          hasFilters ? (
-            <EmptyState
-              title="No transactions match these filters"
-              description="Try a different type, category or date range."
-              action={<Button size="sm" variant="secondary" onClick={() => updateFilter(NO_FILTERS)}>Clear filters</Button>}
-            />
-          ) : (
-            <EmptyState
-              title="No transactions yet"
-              action={<Button size="sm" onClick={() => openTransaction()}><PlusIcon /> Add transaction</Button>}
-            />
-          )
-        ) : (
-          <>
-            <div aria-busy={transactions.isFetching} className={transactions.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}>
-              {visible.length === 0 ? (
-                <EmptyState size="sm" title={`No matches for “${search.trim()}” on this page`} description="Search looks at the rows shown on this page." />
-              ) : (
-                <TransactionTable
-                  layout="card"
-                  transactions={visible}
-                  onEdit={(transaction) => openTransaction({ transaction })}
-                  onDelete={setDeleting}
-                />
+            <div className="mt-3.5 flex flex-wrap items-center gap-2 border-t border-line pt-3.5">
+              <span className="text-[12.5px] text-ink-subtle">Filtered by</span>
+              {filters.type && typeName ? <FilterChip label={typeName} onRemove={() => updateFilter({ type: '' })} /> : null}
+              {categoryName ? <FilterChip label={categoryName} onRemove={() => updateFilter({ category_id: '' })} /> : null}
+              {dates ? <FilterChip label={dates} onRemove={() => updateFilter({ date_from: '', date_to: '' })} /> : null}
+              {(filters.type || filters.category_id) && (
+                <span className="text-[12.5px] text-ink-subtle lg:ml-auto">The totals above use only the dates. Type and category narrow the list below.</span>
               )}
             </div>
-            <nav aria-label="Pagination" className="flex flex-col items-center justify-between gap-3 border-t border-line px-4 py-3 sm:flex-row">
-              <p className="text-label text-ink-subtle tabular-nums" aria-live="polite">
-                Showing <span className="font-medium text-ink">{data.offset + 1}–{data.offset + data.items.length}</span> of{' '}
-                <span className="font-medium text-ink">{data.total}</span>
-              </p>
-              <div className="flex gap-2">
-                <Button variant="secondary" size="sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>
-                  Previous
-                </Button>
-                <Button variant="secondary" size="sm" disabled={offset + PAGE_SIZE >= data.total} onClick={() => setOffset(offset + PAGE_SIZE)}>
-                  Next
-                </Button>
+          )}
+        </form>
+
+        <section className={`${cardClass} p-4 lg:px-5 lg:py-[18px]`} aria-label="Transaction ledger">
+          <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+            <h2 className="text-heading text-ink">{ledgerTitle}</h2>
+            {data && !invalidRange && (
+              <p className="text-[12.5px] text-ink-subtle tabular-nums" aria-live="polite">{transactionCount(data.total)}</p>
+            )}
+          </div>
+
+          {invalidRange ? (
+            <EmptyState title="Fix the date range to see transactions" />
+          ) : transactions.isError ? (
+            <div className="pt-2"><ErrorState error={transactions.error} onRetry={() => transactions.refetch()} /></div>
+          ) : transactions.isPending || !data ? (
+            <SkeletonRows rows={8} label="Loading transactions" />
+          ) : data.total === 0 ? (
+            hasFilters ? (
+              <EmptyState
+                title="No transactions match these filters"
+                description="Try a different type, category or date range."
+                action={<Button size="sm" variant="secondary" onClick={() => updateFilter(NO_FILTERS)}>Clear filters</Button>}
+              />
+            ) : (
+              <EmptyState
+                title="No transactions yet"
+                description="Record your first income or expense to start the list."
+                action={<Button size="sm" onClick={() => openTransaction()}><PlusIcon /> Add transaction</Button>}
+              />
+            )
+          ) : (
+            <>
+              <div aria-busy={transactions.isFetching} className={`max-lg:pt-2 ${transactions.isPlaceholderData ? 'opacity-60 transition-opacity' : ''}`}>
+                {visible.length === 0 ? (
+                  <EmptyState size="sm" title={`No matches for “${search.trim()}” on this page`} description="Search only covers this page. Use the filters to look further back." />
+                ) : (
+                  <TransactionTable
+                    transactions={visible}
+                    onEdit={(transaction) => openTransaction({ transaction })}
+                    onDelete={setDeleting}
+                  />
+                )}
               </div>
-            </nav>
-          </>
-        )}
-      </section>
+              <nav aria-label="Pagination" className="mt-3 flex flex-wrap items-center justify-between gap-3 lg:mt-1.5">
+                <p className="text-label text-ink-muted tabular-nums" aria-live="polite">
+                  Showing <span className="font-semibold text-ink">{data.offset + 1}–{data.offset + data.items.length}</span> of{' '}
+                  <span className="font-semibold text-ink">{data.total}</span>
+                </p>
+                <div className="flex gap-2">
+                  <Button variant="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))} className="pointer-coarse:h-11">
+                    Previous
+                  </Button>
+                  <Button variant="secondary" disabled={offset + PAGE_SIZE >= data.total} onClick={() => setOffset(offset + PAGE_SIZE)} className="pointer-coarse:h-11">
+                    Next
+                  </Button>
+                </div>
+              </nav>
+            </>
+          )}
+        </section>
+      </div>
 
       <ConfirmDialog
         open={deleting !== null}
@@ -212,6 +250,7 @@ export function TransactionsPage() {
               // Deleting the only row on the last page: step back so the page isn't empty.
               if (data?.items.length === 1 && offset > 0) setOffset(Math.max(0, offset - PAGE_SIZE))
               closeDelete()
+              toast('Transaction deleted')
             },
           })
         }

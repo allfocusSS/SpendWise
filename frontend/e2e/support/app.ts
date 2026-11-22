@@ -49,10 +49,9 @@ export function mainNav(page: Page): Locator {
   return page.getByRole('navigation', { name: 'Main' })
 }
 
-export async function goTo(page: Page, link: 'Dashboard' | 'Transactions' | 'Categories' | 'Analytics') {
+export async function goTo(page: Page, link: 'Overview' | 'Transactions' | 'Categories' | 'Analytics') {
   await mainNav(page).getByRole('link', { name: link }).click()
-  const heading = link === 'Dashboard' ? 'Overview' : link
-  await expect(page.getByRole('heading', { level: 1, name: heading })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1, name: link })).toBeVisible()
 }
 
 export async function expectNoHorizontalOverflow(page: Page) {

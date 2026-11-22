@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import spec from '../../../openapi/openapi.json'
-import { formatKzt, formatKztCompact, MAX_AMOUNT_TIYN, parseKztToTiyn, tiynToInput } from './money'
+import { formatKzt, formatKztCompact, formatSignedKzt, MAX_AMOUNT_TIYN, parseKztToTiyn, tiynToInput } from './money'
 
 // Intl uses non-breaking/narrow spaces as group separators; normalise them for readable asserts.
 const plain = (s: string) => s.replace(/[\u00a0\u202f]/g, ' ')
@@ -94,12 +94,28 @@ describe('formatKzt', () => {
     expect(plain(formatKzt(tiyn))).toBe(expected)
   })
 
+  it('separates digit groups and the sign with narrow no-break spaces', () => {
+    expect(formatKzt(123_456_700)).toBe('1\u202f234\u202f567\u202f₸')
+    expect(formatKzt(123_456_700)).not.toMatch(/[ \u00a0]/)
+  })
+
   it.each([1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
     'throws for non-integer or unsafe input %d',
     (value) => {
       expect(() => formatKzt(value)).toThrow(RangeError)
     },
   )
+})
+
+describe('formatSignedKzt', () => {
+  it.each([
+    [28_700_000, '+287 000 ₸'],
+    [-1_250_000, '−12 500 ₸'], // a true minus sign, not a hyphen
+    [-123_455, '−1 234,55 ₸'],
+    [0, '0 ₸'], // zero has no sign
+  ])('formats %d tiyn as %j', (tiyn, expected) => {
+    expect(plain(formatSignedKzt(tiyn))).toBe(expected)
+  })
 })
 
 describe('tiynToInput', () => {

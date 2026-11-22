@@ -1,11 +1,11 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { lazy, Suspense, type ComponentType, type ReactNode } from 'react'
 
-import type { CategoryBreakdown, MonthlyTrend } from '../api/client'
+import type { MonthlyTrend } from '../api/client'
 import { SERIES } from '../lib/chartColors'
 import { retryableLoader } from '../lib/recovery'
 import { ChartErrorFallback, ErrorBoundary } from './ErrorBoundary'
-import { Skeleton } from './ui'
+import { EmptyIcon, ErrorState, Skeleton } from './ui'
 
 /**
  * A lazily loaded chart whose import can be tried again: React.lazy keeps a failed import's error
@@ -26,20 +26,13 @@ function retryableLazy<P extends object>(load: () => Promise<ComponentType<P>>) 
 // Recharts is the largest dependency, so it is loaded only when a chart is on screen.
 const cashFlow = retryableLazy(() => import('./MonthlyTrendChart').then((m) => m.CashFlowChart))
 const netBars = retryableLazy(() => import('./MonthlyTrendChart').then((m) => m.NetBarsChart))
-const treemap = retryableLazy(() => import('./CategoryTreemap').then((m) => m.CategoryTreemap))
 
 /**
  * One chart's boundary: a chart that fails to load or throws shows a fallback at its own height,
  * and the rest of the card and the page keep working. "Try again" loads the chart again with
  * fresh figures, since a chart that threw may have been given bad data.
  */
-function ChartBoundary({ chart, height, loading = <ChartSkeleton height={height} />, children }: {
-  chart: { retry: () => void }
-  height: string
-  /** Shown while the chart's code loads (unchanged from before the boundary). */
-  loading?: ReactNode
-  children: ReactNode
-}) {
+function ChartBoundary({ chart, height, children }: { chart: { retry: () => void }; height: string; children: ReactNode }) {
   const client = useQueryClient()
   return (
     <ErrorBoundary
@@ -50,30 +43,52 @@ function ChartBoundary({ chart, height, loading = <ChartSkeleton height={height}
       }}
       fallback={(props) => <ChartErrorFallback {...props} height={height} />}
     >
-      <Suspense fallback={loading}>{children}</Suspense>
+      <Suspense fallback={<ChartSkeleton height={height} />}>{children}</Suspense>
     </ErrorBoundary>
   )
+}
+
+/** What a chart card needs from a monthly-trend query (React Query's result fits it). */
+export type TrendQuery = { data?: MonthlyTrend; isPending: boolean; isError: boolean; error: unknown; refetch: () => unknown }
+
+/** A trend query's loading and error states at the chart's height; `children` once the data is there. */
+export function TrendQueryBody({ trend, height, children }: {
+  trend: TrendQuery
+  height: string
+  children: (data: MonthlyTrend) => ReactNode
+}) {
+  if (trend.isError) {
+    return (
+      <div className={`flex items-center ${height}`}>
+        <div className="w-full"><ErrorState error={trend.error} onRetry={() => trend.refetch()} /></div>
+      </div>
+    )
+  }
+  if (trend.isPending || !trend.data) return <ChartSkeleton height={height} />
+  return children(trend.data)
 }
 
 const trendIsEmpty = (trend: MonthlyTrend) =>
   trend.months.every((m) => m.income_cents === 0 && m.expense_cents === 0)
 
-/** Legend in series order; kept outside the chart chunk so card headers can show it. */
-export function ChartLegend({ net = false }: { net?: boolean }) {
-  const items = [
-    { label: 'Income', color: SERIES.income },
+const LEGENDS = {
+  flow: [
     { label: 'Expenses', color: SERIES.expense },
-    ...(net ? [{ label: 'Net', color: SERIES.net, line: true }] : []),
-  ]
+    { label: 'Income', color: SERIES.income },
+  ],
+  net: [
+    { label: 'Saved', color: SERIES.income },
+    { label: 'Overspent', color: SERIES.expense },
+  ],
+}
+
+/** Legend for the cash-flow areas or the net bars; kept outside the chart chunk so card headers can show it. */
+export function ChartLegend({ kind = 'flow' }: { kind?: keyof typeof LEGENDS }) {
   return (
-    <ul className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-muted" aria-label="Legend">
-      {items.map((item) => (
-        <li key={item.label} className="flex items-center gap-1.5">
-          {'line' in item ? (
-            <span className="h-0.5 w-4" style={{ backgroundColor: item.color }} aria-hidden="true" />
-          ) : (
-            <span className="size-2.5 rounded-[2px]" style={{ backgroundColor: item.color }} aria-hidden="true" />
-          )}
+    <ul className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] text-ink-muted" aria-label="Legend">
+      {LEGENDS[kind].map((item) => (
+        <li key={item.label} className="flex items-center gap-[7px]">
+          <span className="size-[9px] rounded-full" style={{ backgroundColor: item.color }} aria-hidden="true" />
           {item.label}
         </li>
       ))}
@@ -93,15 +108,18 @@ export function ChartSkeleton({ height = 'h-64' }: { height?: string }) {
 }
 
 /** Plain empty state that keeps the chart's footprint, so the layout doesn't jump when data arrives. */
-export function ChartEmpty({ title, description, action, height = 'h-40' }: {
+export function ChartEmpty({ title, description, action, icon, height = 'h-40' }: {
   title: string
   description?: string
   action?: ReactNode
+  /** Optional decorative icon above the title. */
+  icon?: ReactNode
   height?: string
 }) {
   return (
     <div className={`flex items-center justify-center ${height}`}>
       <div className="flex max-w-xs flex-col items-center gap-1 px-4 text-center">
+        {icon ? <EmptyIcon>{icon}</EmptyIcon> : null}
         <p className="text-label font-medium text-ink">{title}</p>
         {description && <p className="text-label text-ink-subtle">{description}</p>}
         {action && <div className="mt-3">{action}</div>}
@@ -110,44 +128,42 @@ export function ChartEmpty({ title, description, action, height = 'h-40' }: {
   )
 }
 
-export function LazyCashFlowChart({ trend, height = 'h-72', showNet = true, emptyAction }: {
+export function LazyCashFlowChart({ trend, height = 'h-72', highlight, band, summary, empty }: {
   trend: MonthlyTrend
   height?: string
-  showNet?: boolean
-  emptyAction?: ReactNode
+  /** A month ("YYYY-MM") to emphasise, e.g. the one the page is showing. */
+  highlight?: string
+  /** First and last month ("YYYY-MM") of a period to shade, e.g. the Analytics period. */
+  band?: [string, string]
+  /** Shown under the chart, beside the table toggle. */
+  summary?: ReactNode
+  /** Shown instead of the chart when no month has any income or expenses. */
+  empty?: ReactNode
 }) {
   if (trendIsEmpty(trend)) {
-    return (
-      <ChartEmpty
-        title="No cash flow yet"
-        description="Monthly income and expenses will be charted here."
-        action={emptyAction}
-      />
-    )
+    return empty ?? <ChartEmpty title="No cash flow yet" description="Add income or an expense to start the chart." />
   }
   return (
     <ChartBoundary chart={cashFlow} height={height}>
-      <cashFlow.Chart trend={trend} height={height} showNet={showNet} />
+      <cashFlow.Chart trend={trend} height={height} highlight={highlight} band={band} summary={summary} />
     </ChartBoundary>
   )
 }
 
-export function LazyNetBarsChart({ trend, height = 'h-52' }: { trend: MonthlyTrend; height?: string }) {
+export function LazyNetBarsChart({ trend, label, height = 'h-40', highlight, shortLabels }: {
+  trend: MonthlyTrend
+  /** What the bars show, for screen readers ("Monthly net, 6 months to Nov 2026"). */
+  label: string
+  height?: string
+  highlight?: string
+  shortLabels?: boolean
+}) {
   if (trendIsEmpty(trend)) {
-    return <ChartEmpty title="No monthly net yet" description="Each month's income minus expenses (from the server) appears here." />
+    return <ChartEmpty title="No monthly net yet" description="Once a month has income or expenses, you’ll see whether you saved or overspent." height={height} />
   }
   return (
     <ChartBoundary chart={netBars} height={height}>
-      <netBars.Chart trend={trend} height={height} />
-    </ChartBoundary>
-  )
-}
-
-
-export function LazyCategoryTreemap({ breakdown, height = 'h-56' }: { breakdown: CategoryBreakdown; height?: string }) {
-  return (
-    <ChartBoundary chart={treemap} height={height} loading={<Skeleton className={`w-full rounded-[var(--radius-control)] ${height}`} />}>
-      <treemap.Chart breakdown={breakdown} height={height} />
+      <netBars.Chart trend={trend} label={label} height={height} highlight={highlight} shortLabels={shortLabels} />
     </ChartBoundary>
   )
 }
