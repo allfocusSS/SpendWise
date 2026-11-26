@@ -444,6 +444,8 @@ export interface components {
             balance_cents: number;
             /** Transaction Count */
             transaction_count: number;
+            /** Monthly Breakdown */
+            monthly_breakdown?: components["schemas"]["MonthlyTrendItem"][] | null;
         };
         /** TransactionCreate */
         TransactionCreate: {
@@ -1275,8 +1277,12 @@ export interface operations {
     get_summary: {
         parameters: {
             query?: {
+                /** @description First day to include (inclusive). */
                 date_from?: string | null;
+                /** @description Last day to include (inclusive). */
                 date_to?: string | null;
+                /** @description Include monthly_breakdown from the same rows as the totals, for up to 24 months. An open bound uses the first or last matching transaction month. A wider span returns null; an open range without transactions returns an empty list. */
+                include_monthly?: boolean;
             };
             header?: never;
             path?: never;
@@ -1359,7 +1365,7 @@ export interface operations {
         parameters: {
             query?: {
                 months?: number;
-                /** @description Any date in the last month to show */
+                /** @description Any date in the last full month to show (0001-01-01 through 9999-12-31). Windows reaching back before January 0001 start in January 0001. */
                 until?: string | null;
             };
             header?: never;

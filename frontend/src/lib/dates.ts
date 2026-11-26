@@ -5,15 +5,23 @@
  */
 
 const pad = (n: number) => String(n).padStart(2, '0')
+const padYear = (year: number) => String(year).padStart(4, '0')
+
+function localCalendarDate(year: number, month: number, day: number): Date {
+  // The multi-argument Date constructor treats years 0–99 as 1900–1999.
+  const date = new Date(2000, 0, 1)
+  date.setFullYear(year, month, day)
+  return date
+}
 
 export function toIsoDate(date: Date): string {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  return `${padYear(date.getFullYear())}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
 /** Parse "YYYY-MM-DD" as a local calendar date. */
 export function fromIsoDate(value: string): Date {
   const [year, month, day] = value.split('-').map(Number)
-  return new Date(year, month - 1, day)
+  return localCalendarDate(year, month - 1, day)
 }
 
 export function todayIso(now: Date = new Date()): string {
@@ -21,35 +29,35 @@ export function todayIso(now: Date = new Date()): string {
 }
 
 export function startOfMonth(date: Date): Date {
-  return new Date(date.getFullYear(), date.getMonth(), 1)
+  return localCalendarDate(date.getFullYear(), date.getMonth(), 1)
 }
 
 export function endOfMonth(date: Date): Date {
-  return new Date(date.getFullYear(), date.getMonth() + 1, 0)
+  return localCalendarDate(date.getFullYear(), date.getMonth() + 1, 0)
 }
 
 /** First day of the month `months` months before `date`'s month. */
 export function monthsAgo(date: Date, months: number): Date {
-  return new Date(date.getFullYear(), date.getMonth() - months, 1)
+  return addMonths(date, -months)
 }
 
 /** First day of the month `months` months after `date`'s month (negative: before). */
 export function addMonths(date: Date, months: number): Date {
-  return new Date(date.getFullYear(), date.getMonth() + months, 1)
+  return localCalendarDate(date.getFullYear(), date.getMonth() + months, 1)
 }
 
 export function startOfDay(date: Date): Date {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  return localCalendarDate(date.getFullYear(), date.getMonth(), date.getDate())
 }
 
 /** Milliseconds from `now` to the next local midnight. */
 export function msUntilNextDay(now: Date): number {
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime() - now.getTime()
+  return localCalendarDate(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime() - now.getTime()
 }
 
 /** "2026-11": the month of `date`, as the API names months (MonthlyTrend's `month`). */
 export function monthKey(date: Date): string {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}`
+  return `${padYear(date.getFullYear())}-${pad(date.getMonth() + 1)}`
 }
 
 /** "2026-11" → 1 Nov 2026 (local). */
@@ -110,8 +118,8 @@ export function periodRange(key: PeriodKey, now: Date = new Date()): DateRange {
       return { date_from: toIsoDate(monthsAgo(now, 2)), date_to: toIsoDate(endOfMonth(now)) }
     case 'this-year':
       return {
-        date_from: toIsoDate(new Date(now.getFullYear(), 0, 1)),
-        date_to: toIsoDate(new Date(now.getFullYear(), 11, 31)),
+        date_from: toIsoDate(localCalendarDate(now.getFullYear(), 0, 1)),
+        date_to: toIsoDate(localCalendarDate(now.getFullYear(), 11, 31)),
       }
     case 'all-time':
       return {}

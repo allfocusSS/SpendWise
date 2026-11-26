@@ -70,10 +70,14 @@ class TestMonthStarts:
         with pytest.raises(ValueError):
             month_starts(date(2026, 1, 1), 0)
 
+    def test_clips_to_first_representable_month(self) -> None:
+        assert month_starts(date(1, 2, 1), 24) == [date(1, 1, 1), date(1, 2, 1)]
+
 
 def test_next_month_start_handles_december() -> None:
     assert next_month_start(date(2026, 12, 1)) == date(2027, 1, 1)
     assert next_month_start(date(2026, 1, 31)) == date(2026, 2, 1)
+    assert next_month_start(date.max) is None
 
 
 class TestBuildMonthlyTrend:

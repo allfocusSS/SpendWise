@@ -571,8 +571,20 @@ deployment (for example [on AWS](#deploy-to-aws-ec2--cloudformation),
 
 - Amounts are **positive integers in cents (tiyn)**: `250000` = 2 500.00 ₸. The `type` field (`income` / `expense`) gives the direction. Floats and numeric strings are rejected.
 - All totals, balances, percentages and trends are calculated by the backend.
-- The frontend converts typed tenge to tiyn with string parsing in `frontend/src/lib/money.ts` (`parseKztToTiyn`), never with floating-point multiplication, and enforces the same maximum as the backend (a test compares it with `openapi.json`).
+- The frontend validates a single-line amount before converting it to integer tiyn. Use ASCII digits, optionally grouped with a single space between thousands groups (`2 500`). A regular, non-breaking, narrow non-breaking, thin, or figure space is accepted. Use one comma or dot for one or two decimal digits and optionally one `₸` at either edge (`₸2500.50` or `2 500,50 ₸`). Inputs such as `12 34`, `1,234`, and `₸1₸2` are rejected. The frontend and API enforce the same amount maximum.
+- Analytics dates use the Gregorian calendar from `0001-01-01` through `9999-12-31` (inclusive). Use `YYYY-MM-DD` strings. Invalid dates and a `date_from` after `date_to` receive HTTP 422.
+- `GET /api/analytics/summary?include_monthly=true` adds `monthly_breakdown`. Monthly rows and totals use the same owner and inclusive date filters. Empty months are zero-filled within the requested period. A missing boundary uses the first or last matching transaction month. The field is empty when an open period has no matching transactions and `null` for periods spanning more than 24 months. Ordinary summary requests retain their existing response shape.
+- `GET /api/analytics/monthly-trend` shows 1–24 full calendar months ending in the month containing `until` (the current month if omitted). A window that would reach before January 0001 starts in January 0001. December 9999 includes its last day. The Analytics rolling charts use this endpoint independently of the chosen reporting period.
 - Errors return `{"detail": ...}`; `detail` is a string for 404/409/422 business errors and a list for request validation errors.
+
+### v1.0.0 release backlog
+
+- [ ] **Preserve exact tiyn for large analytics totals.** The API currently sends aggregates as
+  JSON numbers. JavaScript cannot represent every integer above `Number.MAX_SAFE_INTEGER`
+  (9,007,199,254,740,991 tiyn), and converting a large safe-integer total to tenge with
+  floating-point division can already lose a tiyn during display. Define a backward-compatible
+  exact representation for aggregate tiyn. Add end-to-end coverage that verifies exact values
+  across serialization, parsing, and rendering on both sides of the safe-integer boundary.
 
 ## AI providers
 

@@ -1021,8 +1021,10 @@
                   "type": "null"
                 }
               ],
+              "description": "First day to include (inclusive).",
               "title": "Date From"
-            }
+            },
+            "description": "First day to include (inclusive)."
           },
           {
             "name": "date_to",
@@ -1038,8 +1040,22 @@
                   "type": "null"
                 }
               ],
+              "description": "Last day to include (inclusive).",
               "title": "Date To"
-            }
+            },
+            "description": "Last day to include (inclusive)."
+          },
+          {
+            "name": "include_monthly",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include monthly_breakdown from the same rows as the totals, for up to 24 months. An open bound uses the first or last matching transaction month. A wider span returns null; an open range without transactions returns an empty list.",
+              "default": false,
+              "title": "Include Monthly"
+            },
+            "description": "Include monthly_breakdown from the same rows as the totals, for up to 24 months. An open bound uses the first or last matching transaction month. A wider span returns null; an open range without transactions returns an empty list."
           }
         ],
         "responses": {
@@ -1206,10 +1222,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Any date in the last month to show",
+              "description": "Any date in the last full month to show (0001-01-01 through 9999-12-31). Windows reaching back before January 0001 start in January 0001.",
               "title": "Until"
             },
-            "description": "Any date in the last month to show"
+            "description": "Any date in the last full month to show (0001-01-01 through 9999-12-31). Windows reaching back before January 0001 start in January 0001."
           }
         ],
         "responses": {
@@ -1654,6 +1670,20 @@
           "transaction_count": {
             "type": "integer",
             "title": "Transaction Count"
+          },
+          "monthly_breakdown": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/MonthlyTrendItem"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Monthly Breakdown"
           }
         },
         "type": "object",

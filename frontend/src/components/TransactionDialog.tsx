@@ -14,6 +14,7 @@ import { Modal } from './Modal'
 import { Button, Field, FormError, LoadingState } from './ui'
 
 const AMOUNT_HINT = 'For example 2500 or 2 500,50'
+const MULTILINE_AMOUNT_ERROR = 'Paste a single-line amount.'
 
 type FormErrors = Partial<Record<'amount' | 'type' | 'category' | 'description' | 'date', string>>
 
@@ -61,11 +62,13 @@ function TransactionForm({ transaction, defaultType, onDone }: {
 
   const [type, setType] = useState<TransactionType>(transaction?.type ?? defaultType)
   const [amount, setAmount] = useState(transaction ? tiynToInput(transaction.amount_cents) : '')
+  const [rejectedAmountPaste, setRejectedAmountPaste] = useState(false)
   const [categoryId, setCategoryId] = useState(transaction ? String(transaction.category_id) : '')
   const [description, setDescription] = useState(transaction?.description ?? '')
   const [date, setDate] = useState(transaction?.occurred_on ?? todayIso())
   const [errors, setErrors] = useState<FormErrors>({})
   const [formError, setFormError] = useState<string | null>(null)
+  const amountError = rejectedAmountPaste ? MULTILINE_AMOUNT_ERROR : errors.amount
 
   const options = (categories.data ?? []).filter((c) => c.type === type)
   const categoryHint =
@@ -90,6 +93,10 @@ function TransactionForm({ transaction, defaultType, onDone }: {
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
     setFormError(null)
+    if (rejectedAmountPaste) {
+      focusFirstInvalid({ amount: MULTILINE_AMOUNT_ERROR })
+      return
+    }
     const result = validate()
     setErrors(result.errors)
     if (Object.keys(result.errors).length > 0 || result.amountTiyn === undefined) {
@@ -184,7 +191,7 @@ function TransactionForm({ transaction, defaultType, onDone }: {
         <label htmlFor="tx-amount" className="text-label font-medium text-ink">Amount</label>
         <div
           className={`mt-2 flex items-center gap-3 rounded-[14px] border bg-surface-raised px-4 py-3.5 transition-colors focus-within:ring-3 ${
-            errors.amount ? 'border-danger focus-within:ring-danger/20' : 'border-field focus-within:border-focus focus-within:ring-focus/25'
+            amountError ? 'border-danger focus-within:ring-danger/20' : 'border-field focus-within:border-focus focus-within:ring-focus/25'
           }`}
         >
           <span className="text-2xl text-ink-subtle" aria-hidden="true">₸</span>
@@ -193,15 +200,24 @@ function TransactionForm({ transaction, defaultType, onDone }: {
             inputMode="decimal"
             autoComplete="off"
             value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            aria-invalid={!!errors.amount}
-            aria-describedby={describedBy('tx-amount', errors.amount, AMOUNT_HINT)}
+            onChange={(e) => {
+              setRejectedAmountPaste(false)
+              setAmount(e.target.value)
+            }}
+            onPaste={(e) => {
+              // A text input can turn clipboard line breaks into spaces before onChange.
+              const isMultiline = /[\r\n]/.test(e.clipboardData.getData('text/plain'))
+              if (isMultiline) e.preventDefault()
+              setRejectedAmountPaste(isMultiline)
+            }}
+            aria-invalid={!!amountError}
+            aria-describedby={describedBy('tx-amount', amountError, AMOUNT_HINT)}
             className="w-full min-w-0 bg-transparent text-[34px] leading-tight font-[650] tracking-[-0.035em] tabular-nums text-ink caret-accent placeholder:text-ink-subtle/50 focus:outline-none"
             placeholder="0"
           />
         </div>
-        {errors.amount ? (
-          <p id="tx-amount-error" className="mt-1.5 text-xs font-medium text-danger">{errors.amount}</p>
+        {amountError ? (
+          <p id="tx-amount-error" className="mt-1.5 text-xs font-medium text-danger">{amountError}</p>
         ) : (
           <p id="tx-amount-hint" className="mt-1.5 text-xs text-ink-subtle">{AMOUNT_HINT}</p>
         )}

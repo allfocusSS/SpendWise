@@ -116,6 +116,42 @@ def test_monthly_trend(alice_ledger: User) -> None:
     ]
 
 
+def test_partial_months_reconcile_with_totals_and_are_private(
+    alice_ledger: User, bob: User
+) -> None:
+    filters = {"date_from": "2025-04-12", "date_to": "2025-05-05", "include_monthly": True}
+    response = alice_ledger.get("/api/analytics/summary", params=filters)
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "date_from": "2025-04-12",
+        "date_to": "2025-05-05",
+        "total_income_cents": 60_000_050,
+        "total_expense_cents": 24_750_025,
+        "balance_cents": 35_250_025,
+        "transaction_count": 5,
+        "monthly_breakdown": [
+            {
+                "month": "2025-04",
+                "income_cents": 8_000_050,
+                "expense_cents": 24_750_025,
+                "net_cents": -16_749_975,
+            },
+            {
+                "month": "2025-05",
+                "income_cents": 52_000_000,
+                "expense_cents": 0,
+                "net_cents": 52_000_000,
+            },
+        ],
+    }
+    other = bob.get("/api/analytics/summary", params=filters)
+    assert other.status_code == 200, other.text
+    assert other.json()["monthly_breakdown"] == [
+        {"month": month, "income_cents": 0, "expense_cents": 0, "net_cents": 0}
+        for month in ("2025-04", "2025-05")
+    ]
+
+
 def test_another_user_sees_none_of_it(alice_ledger: User, bob: User) -> None:
     summary = bob.get("/api/analytics/summary").json()
     assert (summary["total_income_cents"], summary["total_expense_cents"]) == (0, 0)
