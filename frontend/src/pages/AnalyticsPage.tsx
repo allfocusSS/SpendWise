@@ -108,7 +108,9 @@ function PeriodAnalytics({ range, periodLabel, periodName, trend }: {
   periodName: string
   trend: TrendQuery
 }) {
-  const summary = useSummary(range)
+  // Open and multi-month periods can show a comparison. Single months and all-time use totals only.
+  const spansMonths = range.date_from?.slice(0, 7) !== range.date_to?.slice(0, 7)
+  const summary = useSummary(spansMonths ? { ...range, include_monthly: true } : range)
   const expenses = useCategoryBreakdown({ type: 'expense', ...range })
   const income = useCategoryBreakdown({ type: 'income', ...range })
   const categories = (query: BreakdownQuery, kind: string) => {
@@ -131,7 +133,7 @@ function PeriodAnalytics({ range, periodLabel, periodName, trend }: {
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 lg:gap-[18px] xl:grid-cols-4">
         <CashFlowCard trend={trend} band={bandFor(range, trend.data)} className="lg:col-span-2 xl:col-span-3" />
-        <Comparison query={summary} trend={trend} band={bandFor(range, trend.data)} />
+        <Comparison query={summary} />
         <BreakdownCard title="Spending by category" query={expenses} meta={periodName} className="xl:col-span-2" />
         <BreakdownCard title="Income by category" query={income} />
         <NetCard trend={trend} />
@@ -203,12 +205,10 @@ function NetCard({ trend }: { trend: TrendQuery }) {
 
 /**
  * Income against expenses for the period as two bars (widths are presentation only), each month's
- * net when the period is a few months inside the chart's window, and the period's net change.
+ * net for short periods, and the period's net change. All values use the same date boundaries.
  */
-function Comparison({ query, trend, band }: {
+function Comparison({ query }: {
   query: { data?: Summary; isPending: boolean; isError: boolean; error: unknown; refetch: () => unknown }
-  trend: TrendQuery
-  band?: [string, string]
 }) {
   const data = query.data
   const largest = data ? Math.max(data.total_income_cents, data.total_expense_cents) : 0
@@ -218,7 +218,7 @@ function Comparison({ query, trend, band }: {
         { label: 'Expenses', value: data.total_expense_cents, color: SERIES.expense },
       ]
     : []
-  const months = band ? (trend.data?.months ?? []).filter((m) => m.month >= band[0] && m.month <= band[1]) : []
+  const months = data?.monthly_breakdown ?? []
   const listMonths = months.length > 1 && months.length <= LISTED_MONTHS
   return (
     <Card title="Income vs expenses">

@@ -4,7 +4,7 @@ The small pure functions at the top hold the math and are unit-tested directly; 
 functions below fetch sums from the database and hand them to those functions.
 """
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import extract, func, select
@@ -19,6 +19,10 @@ from app.schemas.analytics import (
     Summary,
 )
 from app.services.transactions import TransactionFilters, apply_filters
+
+MAX_MONTHS = 24
+TRANSACTION_YEAR = extract("year", Transaction.occurred_on)
+TRANSACTION_MONTH = extract("month", Transaction.occurred_on)
 
 # ---------------------------------------------------------------------------
 # Pure calculation helpers
@@ -41,6 +45,10 @@ def calculate_percentage(part_cents: int, total_cents: int) -> float:
     return float(share.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
+def _month_index(day: date) -> int:
+    return (day.year - 1) * 12 + day.month - 1
+
+
 def month_starts(until: date, months: int) -> list[date]:
     """First day of each of the last `months` calendar months ending with `until`'s month.
 
@@ -48,15 +56,16 @@ def month_starts(until: date, months: int) -> list[date]:
     """
     if months < 1:
         raise ValueError("months must be at least 1")
-    year, month = until.year, until.month
-    starts = []
-    for _ in range(months):
-        starts.append(date(year, month, 1))
-        year, month = (year - 1, 12) if month == 1 else (year, month - 1)
-    return list(reversed(starts))
+    end = _month_index(until)
+    return [
+        date(index // 12 + 1, index % 12 + 1, 1)
+        for index in range(max(0, end - months + 1), end + 1)
+    ]
 
 
-def next_month_start(day: date) -> date:
+def next_month_start(day: date) -> date | None:
+    if day.year == date.max.year and day.month == 12:
+        return None
     return date(day.year + 1, 1, 1) if day.month == 12 else date(day.year, day.month + 1, 1)
 
 
@@ -85,22 +94,43 @@ def build_monthly_trend(
 
 
 def get_summary(
-    db: Session, user_id: int, date_from: date | None = None, date_to: date | None = None
+    db: Session,
+    user_id: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    *,
+    include_monthly: bool = False,
 ) -> Summary:
+    grouped = select(
+        Transaction.type, func.sum(Transaction.amount_cents), func.count(Transaction.id)
+    ).group_by(Transaction.type)
+    # A wide closed range can never return buckets. Keep the normal totals-only query for it.
+    group_by_month = include_monthly and (
+        date_from is None
+        or date_to is None
+        or _month_index(date_to) - _month_index(date_from) < MAX_MONTHS
+    )
+    if group_by_month:
+        grouped = grouped.add_columns(TRANSACTION_YEAR, TRANSACTION_MONTH).group_by(
+            TRANSACTION_YEAR, TRANSACTION_MONTH
+        )
     query = apply_filters(
-        select(
-            Transaction.type, func.sum(Transaction.amount_cents), func.count(Transaction.id)
-        ).group_by(Transaction.type),
+        grouped,
         TransactionFilters(user_id=user_id, date_from=date_from, date_to=date_to),
     )
     sums = {TransactionType.INCOME: 0, TransactionType.EXPENSE: 0}
     count = 0
-    for type_, total, n in db.execute(query):
+    monthly_totals: dict[tuple[int, int, str], int] = {}
+    for type_, total, n, *bucket in db.execute(query):
         # int(): PostgreSQL returns SUM(BIGINT) as Decimal; SQLite returns int.
-        sums[TransactionType(type_)] = int(total)
+        kind, amount = TransactionType(type_), int(total)
+        sums[kind] += amount
         count += n
+        if bucket:
+            year, month = bucket
+            monthly_totals[int(year), int(month), kind] = amount
 
-    return Summary(
+    summary = Summary(
         date_from=date_from,
         date_to=date_to,
         total_income_cents=sums[TransactionType.INCOME],
@@ -110,6 +140,25 @@ def get_summary(
         ),
         transaction_count=count,
     )
+    if include_monthly:
+        summary.monthly_breakdown = (
+            _summary_months(monthly_totals, date_from, date_to) if group_by_month else None
+        )
+    return summary
+
+
+def _summary_months(
+    totals: dict[tuple[int, int, str], int], date_from: date | None, date_to: date | None
+) -> list[MonthlyTrendItem] | None:
+    if not totals and (date_from is None or date_to is None):
+        return []
+
+    first = date_from or date(*min(totals)[:2], 1)
+    last = date_to or date(*max(totals)[:2], 1)
+    months = _month_index(last) - _month_index(first) + 1
+    if months > MAX_MONTHS:
+        return None
+    return build_monthly_trend(month_starts(last, months), totals)
 
 
 def get_category_breakdown(
@@ -155,18 +204,17 @@ def get_monthly_trend(
 ) -> MonthlyTrend:
     until = until or date.today()
     month_list = month_starts(until, months)
-    period_start, period_end = month_list[0], next_month_start(month_list[-1])
+    following_month = next_month_start(until)
+    period_end = following_month - timedelta(days=1) if following_month else date.max
 
-    year_col = extract("year", Transaction.occurred_on)
-    month_col = extract("month", Transaction.occurred_on)
-    query = (
-        select(year_col, month_col, Transaction.type, func.sum(Transaction.amount_cents))
-        .where(
-            Transaction.user_id == user_id,
-            Transaction.occurred_on >= period_start,
-            Transaction.occurred_on < period_end,
-        )
-        .group_by(year_col, month_col, Transaction.type)
+    query = apply_filters(
+        select(
+            TRANSACTION_YEAR,
+            TRANSACTION_MONTH,
+            Transaction.type,
+            func.sum(Transaction.amount_cents),
+        ).group_by(TRANSACTION_YEAR, TRANSACTION_MONTH, Transaction.type),
+        TransactionFilters(user_id=user_id, date_from=month_list[0], date_to=period_end),
     )
     totals = {
         (int(year), int(month), TransactionType(type_)): int(total)

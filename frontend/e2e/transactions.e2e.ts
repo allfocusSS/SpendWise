@@ -147,4 +147,46 @@ test.describe('Transactions', () => {
     await dialog.getByRole('button', { name: 'Cancel' }).click()
     await expect(ledger(page)).toContainText('No transactions yet')
   })
+
+  test('malformed amounts cannot be saved and a corrected KZT value stays exact', async ({ page }) => {
+    const saves: unknown[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/transactions') {
+        saves.push(request.postDataJSON().amount_cents)
+      }
+    })
+    await page.getByRole('banner').getByRole('button', { name: 'Add transaction' }).click()
+    const dialog = page.getByRole('dialog', { name: 'New transaction' })
+    await fillTransaction(dialog, { category: 'Groceries', description: 'Corrected amount' })
+    const amount = dialog.getByLabel('Amount')
+    const save = dialog.getByRole('button', { name: 'Add expense' })
+
+    for (const malformed of ['12 34', '₸1₸2', '1, 23', '1,234']) {
+      await amount.fill(malformed)
+      await save.click()
+      await expect(amount).toHaveAttribute('aria-invalid', 'true')
+      await expect(amount).toBeFocused()
+      await expect(dialog.getByText(/single spaces between thousands/)).toBeVisible()
+    }
+
+    await amount.fill('920')
+    const pasteWasAccepted = await amount.evaluate((input) => {
+      const clipboardData = new DataTransfer()
+      clipboardData.setData('text/plain', '1\n234')
+      return input.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData }))
+    })
+    expect(pasteWasAccepted).toBe(false)
+    await expect(amount).toHaveValue('920')
+    await expect(dialog.getByText('Paste a single-line amount.')).toBeVisible()
+    await save.click()
+    await expect(amount).toBeFocused()
+    await expect(dialog).toBeVisible()
+    expect(saves).toEqual([])
+
+    await amount.fill('1\u202f234,50 ₸')
+    await save.click()
+    await expect(dialog).toBeHidden()
+    await expect(entry(ledger(page), 'Corrected amount')).toContainText(kzt('1 234,50', '−'))
+    expect(saves).toEqual([123_450])
+  })
 })

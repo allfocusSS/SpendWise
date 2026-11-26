@@ -6,6 +6,14 @@ from app.models import TransactionType
 from app.schemas.common import MoneyCents
 
 
+class MonthlyTrendItem(BaseModel):
+    month: str  # "YYYY-MM"
+    income_cents: MoneyCents
+    expense_cents: MoneyCents
+    # Can be negative when expenses exceed income.
+    net_cents: MoneyCents
+
+
 class Summary(BaseModel):
     date_from: date | None
     date_to: date | None
@@ -14,6 +22,7 @@ class Summary(BaseModel):
     # Can be negative when expenses exceed income.
     balance_cents: MoneyCents
     transaction_count: int
+    monthly_breakdown: list[MonthlyTrendItem] | None = None
 
 
 class CategoryBreakdownItem(BaseModel):
@@ -32,14 +41,6 @@ class CategoryBreakdown(BaseModel):
     date_to: date | None
     total_cents: MoneyCents
     items: list[CategoryBreakdownItem]
-
-
-class MonthlyTrendItem(BaseModel):
-    month: str  # "YYYY-MM"
-    income_cents: MoneyCents
-    expense_cents: MoneyCents
-    # Can be negative when expenses exceed income.
-    net_cents: MoneyCents
 
 
 class MonthlyTrend(BaseModel):

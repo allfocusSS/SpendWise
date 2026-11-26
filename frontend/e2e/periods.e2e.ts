@@ -203,6 +203,37 @@ test.describe('Dashboard periods', () => {
 })
 
 test.describe('Analytics periods', () => {
+  test('comparison rows reconcile for a partial range outside the rolling chart', async ({ page, account }) => {
+    expect(account.email).toBeTruthy()
+    await page.clock.install({ time: at('2026-05-20T12:00') })
+    await page.goto('/')
+    await addTransaction(page, { type: 'income', amount: '900', category: 'Salary', description: 'Before range', date: '2025-01-14' })
+    await addTransaction(page, { type: 'income', amount: '100', category: 'Salary', description: 'Start of range', date: '2025-01-15' })
+    await addTransaction(page, { type: 'expense', amount: '35,25', category: 'Groceries', description: 'End of range', date: '2025-03-05' })
+    await addTransaction(page, { type: 'income', amount: '500', category: 'Salary', description: 'After range', date: '2025-03-06' })
+
+    const trend = watchTrend(page)
+    await page.goto('/analytics')
+    await page.getByRole('group', { name: 'Period' }).getByRole('button', { name: 'Custom' }).click()
+    await page.getByLabel('From', { exact: true }).fill('2025-01-15')
+    const to = page.getByLabel('To', { exact: true })
+    await to.fill('2025-03-05')
+
+    const comparison = page.getByRole('region', { name: 'Income vs expenses' })
+    const exactKzt = (amount: string, sign?: '+' | '−') => new RegExp(`^${kzt(amount, sign).source}$`)
+    await expect(total(page, 'Net change')).toHaveText(exactKzt('64,75', '+'))
+    await expect(total(page, 'Transactions')).toHaveText('2')
+    await expect(comparison.getByRole('term')).toHaveText(['January', 'February', 'March'])
+    await expect(comparison.getByRole('definition')).toHaveText([exactKzt('100', '+'), exactKzt('0'), exactKzt('35,25', '−')])
+    await expect(comparison).toContainText(kzt('64,75', '+'))
+    await expect(cashFlow(page)).toContainText(spaced('Last 12 months · Jun 2025 – May 2026'))
+
+    await to.fill('')
+    await expect(total(page, 'Net change')).toHaveText(exactKzt('564,75', '+'))
+    await expect(comparison.getByRole('definition')).toHaveText([exactKzt('100', '+'), exactKzt('0'), exactKzt('464,75', '+')])
+    expect(trend).toEqual([{ months: '12', until: '2026-05-01' }])
+  })
+
   test('every period says exactly what it covers; the 12-month charts say they are independent of it', async ({ page, account }) => {
     expect(account.email).toBeTruthy()
     await page.clock.install({ time: at('2026-05-20T12:00') })

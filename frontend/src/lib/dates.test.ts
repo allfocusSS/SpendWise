@@ -36,6 +36,12 @@ describe('toIsoDate / fromIsoDate', () => {
   it('round-trips', () => {
     expect(toIsoDate(fromIsoDate('2024-02-29'))).toBe('2024-02-29')
   })
+
+  it.each(['0001-01-01', '0099-12-31', '9999-12-31'])('preserves the calendar year of %s', (iso) => {
+    expect(toIsoDate(fromIsoDate(iso))).toBe(iso)
+    const key = iso.slice(0, 7)
+    expect(monthKey(fromMonthKey(key))).toBe(key)
+  })
 })
 
 describe('periodRange', () => {
@@ -90,6 +96,25 @@ describe('month arithmetic', () => {
     expect(toIsoDate(endOfMonth(new Date(2025, 1, 10)))).toBe('2025-02-28')
     expect(toIsoDate(endOfMonth(new Date(2000, 1, 10)))).toBe('2000-02-29') // divisible by 400
     expect(toIsoDate(endOfMonth(new Date(2100, 1, 10)))).toBe('2100-02-28') // divisible by 100
+  })
+
+  it('normalizes early and final-year dates without shifting the year', () => {
+    const leapDay = fromIsoDate('0004-02-29')
+    const endOfCalendar = fromIsoDate('9999-12-31')
+    expect(toIsoDate(endOfMonth(fromIsoDate('0001-01-20')))).toBe('0001-01-31')
+    expect(toIsoDate(endOfMonth(leapDay))).toBe('0004-02-29')
+    expect(toIsoDate(endOfMonth(endOfCalendar))).toBe('9999-12-31')
+    expect(toIsoDate(addMonths(fromIsoDate('0099-12-31'), 1))).toBe('0100-01-01')
+    expect(toIsoDate(addMonths(fromIsoDate('0100-01-01'), -1))).toBe('0099-12-01')
+    expect(trendWindow(leapDay, 6)).toEqual({ months: 6, until: '0004-02-01' })
+    expect(trendWindow(endOfCalendar, 6)).toEqual({ months: 6, until: '9999-12-01' })
+    expect(periodRange('this-year', leapDay)).toEqual({ date_from: '0004-01-01', date_to: '0004-12-31' })
+    expect(periodRange('last-month', fromIsoDate('0099-02-10'))).toEqual({
+      date_from: '0099-01-01',
+      date_to: '0099-01-31',
+    })
+    expect(toIsoDate(startOfDay(leapDay))).toBe('0004-02-29')
+    expect(msUntilNextDay(leapDay)).toBe(24 * 60 * 60 * 1000)
   })
 
   it('names months as the API does, and back', () => {

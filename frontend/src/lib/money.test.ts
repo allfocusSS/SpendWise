@@ -28,6 +28,10 @@ describe('parseKztToTiyn', () => {
     ['2500', 250_000],
     ['2 500', 250_000],
     ['2\u00a0500,50', 250_050], // non-breaking space, comma decimal
+    ['₸2\u202f500,50', 250_050],
+    ['₸\u20092\u2009500.50', 250_050],
+    ['2\u2007500,5\u2007₸', 250_050],
+    ['10 000 000 000,00 ₸', MAX_AMOUNT_TIYN],
     ['2500.5', 250_050],
     ['19.99', 1_999], // 19.99 * 100 is 1998.9999999999998 in floating point
     ['0.29', 29], // 0.29 * 100 is 28.999999999999996 in floating point
@@ -53,6 +57,28 @@ describe('parseKztToTiyn', () => {
     ['1e5', 'exponent'],
     ['abc', 'letters'],
     ['2,500.50', 'mixed separators'],
+    ['12 34', 'short thousands group'],
+    ['1234 567', 'oversized first group'],
+    ['1 234 56', 'short final group'],
+    ['1  234', 'repeated spacing'],
+    ['1\t234', 'tab between digits'],
+    ['1\n234', 'newline between digits'],
+    ['1\n₸', 'newline before the currency symbol'],
+    ['1, 23', 'space after decimal separator'],
+    ['1 .23', 'space before decimal separator'],
+    ['1,234', 'comma could mean thousands'],
+    ['1.234.567', 'dot thousands groups'],
+    ['1,234,56', 'repeated decimal separator'],
+    ['₸1₸2', 'embedded currency symbol'],
+    ['1₸23', 'symbol between digits'],
+    ['₸123₸', 'currency symbol on both edges'],
+    ['123 ₸₸', 'duplicated currency symbol'],
+    ['₸  123', 'repeated space after symbol'],
+    ['₸', 'missing amount'],
+    ['123 KZT', 'unsupported currency suffix'],
+    ['$123', 'foreign currency'],
+    ['１２３', 'fullwidth digits'],
+    ['1\u200b234', 'zero-width separator'],
     ['Infinity', 'Infinity'],
     ['NaN', 'NaN'],
   ])('rejects %j (%s)', (input) => {
@@ -78,6 +104,12 @@ describe('parseKztToTiyn', () => {
     expect(parseKztToTiyn('')).toEqual({ ok: false, error: 'Enter an amount.' })
     expect(parseKztToTiyn('0')).toEqual({ ok: false, error: 'Amount must be greater than zero.' })
     expect(parseKztToTiyn('abc').ok).toBe(false)
+  })
+
+  it('accepts copied positive KZT display values exactly', () => {
+    for (const tiyn of [1, 99, 1_999, 250_050, 123_456_700, MAX_AMOUNT_TIYN]) {
+      expect(parsed(formatKzt(tiyn))).toBe(tiyn)
+    }
   })
 })
 
